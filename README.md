@@ -24,7 +24,77 @@ Mistral Vibe is a command-line coding assistant powered by Mistral's models. It 
 > [!WARNING]
 > Mistral Vibe works on Windows, but we officially support and target UNIX environments.
 
-### One-line install (recommended)
+## Hackathon Agent Room quick start
+
+This fork adds the browser Agent Room and the matching Textual **Office** view.
+Both are clients of one local backend, so they show the same real agents,
+conversations, queues, approvals, questions, token usage, cost, worktrees, and
+lifecycle state. Install this repository from source; the released
+`mistral-vibe` package does not include these hackathon features.
+
+### 1. Install the fork
+
+Install Git, Python 3.12 or newer, and
+[uv](https://docs.astral.sh/uv/getting-started/installation/). On macOS or
+Linux, uv can be installed with:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+Then clone and install this fork:
+
+```bash
+git clone https://github.com/lcabannes/mistral-vibe-hackathon.git
+cd mistral-vibe-hackathon
+uv sync --no-dev
+```
+
+Configure the Mistral API key once. The interactive setup saves it under
+`~/.vibe`, or you can export `MISTRAL_API_KEY` in your shell instead:
+
+```bash
+uv run --no-dev vibe --setup
+```
+
+### 2. Start the shared backend and webpage
+
+From the repository checkout, run this in terminal 1 and leave it running:
+
+```bash
+uv run --no-dev python web/agent-room/server.py \
+  --workdir "$PWD" \
+  --network-mode auto
+```
+
+Open <http://127.0.0.1:4173/web/agent-room/>. `auto` is the recommended
+network mode: it keeps a working proxy and bypasses an inherited proxy that
+rejects Mistral API traffic. Use `--network-mode direct` to always bypass
+shell proxy settings, or `--network-mode inherit` to always keep them.
+
+### 3. Start the synced CLI
+
+Run this in terminal 2 from the same checkout:
+
+```bash
+VIBE_AGENT_ROOM_URL=http://127.0.0.1:4173 \
+VIBE_AGENT_ROOM_AUTOSTART=0 \
+uv run --no-dev vibe
+```
+
+Press `Ctrl+3` to open **Office**. Select any agent to compare its conversation
+and status with the webpage, send another message, cancel or stop work, resolve
+approvals, or answer questions. Stopped and failed agents remain selectable;
+sending a message resumes the same session and worktree.
+
+Only one Agent Room backend may use a given `~/.vibe` directory. If startup
+reports that port 4173 or the backend is already owned, use the already-running
+page at <http://127.0.0.1:4173/web/agent-room/> or stop that process first.
+
+## Upstream CLI installation (without hackathon features)
+
+The commands below install Mistral's released CLI. Use the source installation
+above when you need Agent Room or the synchronized Office view.
 
 **Linux and macOS**
 
@@ -56,6 +126,7 @@ pip install mistral-vibe
 
 ## Table of Contents
 
+- [Hackathon Agent Room quick start](#hackathon-agent-room-quick-start)
 - [Features](#features)
   - [Built-in Agents](#built-in-agents)
   - [Subagents and Task Delegation](#subagents-and-task-delegation)
