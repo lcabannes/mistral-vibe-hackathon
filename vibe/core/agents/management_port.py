@@ -1,12 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import Protocol
 
-from vibe.core.agents.events import ManagedAgentLifecycleEvent
 from vibe.core.agents.models import ManagedAgentSnapshot
-
-type ManagedAgentLifecycleListener = Callable[[ManagedAgentLifecycleEvent], None]
 
 
 class AgentManagementPort(Protocol):
