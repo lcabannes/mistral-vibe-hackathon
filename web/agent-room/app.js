@@ -114,9 +114,8 @@ const elements = {
   simulateButton: document.querySelector("#simulate-button"),
   feedStatus: document.querySelector("#feed-status"),
   officeClock: document.querySelector("#office-clock"),
-  wallArtLogo: document.querySelector("#wall-art-logo"),
-  wallArtLandmark: document.querySelector("#wall-art-landmark"),
-  wallArtLandmarkUse: document.querySelector("#wall-art-landmark-use"),
+  roomLandmark: document.querySelector("#room-landmark"),
+  roomLandmarkUse: document.querySelector("#room-landmark-use"),
   summaryRunning: document.querySelector("#summary-running"),
   summaryAttention: document.querySelector("#summary-attention"),
   summaryPast: document.querySelector("#summary-past"),
@@ -148,9 +147,8 @@ function syncThemeUI(theme) {
   for (const option of elements.themeGrid.querySelectorAll(".theme-option")) {
     option.setAttribute("aria-pressed", String(option.dataset.themeChoice === (theme || "")));
   }
-  elements.wallArtLandmarkUse.setAttribute("href", `#landmark-${theme || "default"}`);
-  elements.wallArtLogo.hidden = Boolean(theme);
-  elements.wallArtLandmark.hidden = !theme;
+  elements.roomLandmarkUse.setAttribute("href", `#landmark-${theme || "default"}`);
+  elements.roomLandmark.hidden = !theme;
 }
 
 function applyTheme(theme) {

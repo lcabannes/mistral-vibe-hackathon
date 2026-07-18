@@ -275,6 +275,11 @@
             <p class="eyebrow">Control home</p>
             <h1 id="room-title">The agent room</h1>
           </div>
+          <div class="room-landmark" id="room-landmark" aria-hidden="true" hidden>
+            <svg viewBox="0 0 10 14" shape-rendering="crispEdges">
+              <use id="room-landmark-use" href="#landmark-default" />
+            </svg>
+          </div>
           <div class="summary-strip" aria-label="Agent summary">
             <div><strong id="summary-running">0</strong><span>Running</span></div>
             <div><strong id="summary-attention">0</strong><span>Needs you</span></div>
@@ -313,23 +318,13 @@
           <div class="room-window" aria-hidden="true">
             <span></span><span></span><span></span>
           </div>
-          <div class="wall-art" id="wall-art" aria-hidden="true">
+          <div class="wall-art" aria-hidden="true">
             <img
-              id="wall-art-logo"
               src="../../distribution/zed/icons/mistral_vibe.svg"
               alt=""
               width="28"
               height="28"
             />
-            <svg
-              id="wall-art-landmark"
-              class="wall-art-landmark"
-              viewBox="0 0 10 14"
-              shape-rendering="crispEdges"
-              hidden
-            >
-              <use id="wall-art-landmark-use" href="#landmark-default" />
-            </svg>
           </div>
           <div class="office-clock" aria-label="Local time" id="office-clock"></div>
           <div class="zones" id="zones"></div>
