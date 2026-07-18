@@ -499,11 +499,31 @@ select:focus-visible {
 }
 
 .room-header {
+  position: relative;
   display: grid;
   grid-template-columns: minmax(140px, 1fr) auto;
   align-items: end;
   gap: 24px;
   padding: 22px 28px 16px;
+}
+
+.room-landmark {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  display: grid;
+  place-items: center;
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: white;
+  transform: translate(-50%, -50%);
+}
+
+.room-landmark svg {
+  display: block;
+  width: 26px;
+  height: 36px;
 }
 
 .eyebrow {
@@ -719,11 +739,6 @@ h1 {
 .wall-art img {
   width: 28px;
   height: 28px;
-}
-
-.wall-art-landmark {
-  width: 30px;
-  height: 42px;
 }
 
 .office-clock {
