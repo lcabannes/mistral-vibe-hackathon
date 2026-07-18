@@ -461,6 +461,31 @@ Markdown {
         text-style: bold;
     }
 
+    MarkdownStrong {
+        text-style: bold;
+    }
+
+    MarkdownEmphasis {
+        text-style: italic;
+    }
+
+    MarkdownH1 {
+        text-style: bold;
+    }
+
+    MarkdownH2 {
+        text-style: bold;
+    }
+
+    MarkdownH3 {
+        text-style: bold;
+    }
+
+    MarkdownLink {
+        color: $primary;
+        text-style: underline;
+    }
+
     MarkdownFence {
         overflow-x: auto;
         scrollbar-size-horizontal: 1;
@@ -675,6 +700,16 @@ Markdown {
         &:ansi {
             text-style: dim;
         }
+    }
+
+    MarkdownStrong {
+        text-style: bold italic;
+    }
+
+    MarkdownH1,
+    MarkdownH2,
+    MarkdownH3 {
+        text-style: bold italic;
     }
 
     & > MarkdownBlock:last-child {
