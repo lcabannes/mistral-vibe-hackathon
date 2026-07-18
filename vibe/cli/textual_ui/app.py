@@ -3596,14 +3596,22 @@ class VibeApp(App):  # noqa: PLR0904
             )
             return
 
-        lines = [f"- `{p}`" for p in sorted(placeholders)]
+        from vibe.core.secret_store import env_var_name, vault_dir
+
+        vault_file = vault_dir() / "secrets.toml"
+        lines = [
+            f"- `{p}` — usable in commands as `${env_var_name(p)}`"
+            for p in sorted(placeholders)
+        ]
         await self._mount_and_scroll(
             UserCommandMessage(
-                "## Privacy vault\n\nSecret values live in the OS keychain and "
-                "are never shown. The cloud model only ever sees these "
+                "## Privacy vault\n\nThe cloud model only ever sees these "
                 "placeholders:\n\n"
                 + "\n".join(lines)
-                + "\n\nRemove one with `/secrets delete <placeholder>`."
+                + f"\n\nReal values are stored in a protected file the cloud "
+                f"model cannot read — `{vault_file}` — accessible to you and "
+                f"the local model. Remove one with "
+                f"`/secrets delete <placeholder>`."
             )
         )
 

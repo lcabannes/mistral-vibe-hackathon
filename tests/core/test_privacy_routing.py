@@ -450,3 +450,71 @@ class TestFreshRedactionTurn:
         ]
         # Only the original injection from turn one remains in history.
         assert len(fresh_notices) == 1
+
+
+class TestSecretEnvGating:
+    def test_main_loop_gets_no_secret_env_by_default(self):
+        config = _redact_config()
+        agent = build_test_agent_loop(config=config, backend=FakeBackend())
+        assert agent._resolve_secret_env() == {}
+
+    def test_main_loop_gets_env_when_opted_in(self, monkeypatch):
+        config = _redact_config(expose_secrets_as_env=True)
+        agent = build_test_agent_loop(config=config, backend=FakeBackend())
+        monkeypatch.setattr(
+            "vibe.core.agent_loop._loop.vault_env_vars",
+            lambda: {"VIBE_SECRET_JWT_1": "value"},
+        )
+        assert agent._resolve_secret_env() == {"VIBE_SECRET_JWT_1": "value"}
+
+    def test_local_subagent_always_gets_env(self, monkeypatch):
+        config = _redact_config()
+        agent = build_test_agent_loop(
+            config=config, backend=FakeBackend(), bypass_path_guard=True
+        )
+        monkeypatch.setattr(
+            "vibe.core.agent_loop._loop.vault_env_vars",
+            lambda: {"VIBE_SECRET_JWT_1": "value"},
+        )
+        assert agent._resolve_secret_env() == {"VIBE_SECRET_JWT_1": "value"}
+
+
+class TestSecretEnvReachesBash:
+    @pytest.mark.asyncio
+    async def test_env_var_expands_in_bash_subprocess(self, monkeypatch, tmp_path):
+        from vibe.core.types import FunctionCall, ToolCall
+
+        config = _redact_config(expose_secrets_as_env=True)
+        config = config.model_copy(
+            update={
+                "bypass_tool_permissions": True,
+                "tools": {"bash": {"permission": "always"}},
+            }
+        )
+        monkeypatch.setattr(
+            "vibe.core.agent_loop._loop.vault_env_vars",
+            lambda: {"VIBE_SECRET_JWT_1": "the-real-secret"},
+        )
+        out_file = tmp_path / "out.txt"
+        bash_chunk = mock_llm_chunk(
+            content="",
+            tool_calls=[
+                ToolCall(
+                    id="call-1",
+                    index=0,
+                    function=FunctionCall(
+                        name="bash",
+                        arguments=(
+                            '{"command": "printf %s \\"$VIBE_SECRET_JWT_1\\" > '
+                            + f'{out_file}"}}'
+                        ),
+                    ),
+                )
+            ],
+        )
+        backend = FakeBackend([[bash_chunk], [mock_llm_chunk(content="done")]])
+        agent = build_test_agent_loop(config=config, backend=backend)
+
+        [_ async for _ in agent.act("write the secret to a file")]
+
+        assert out_file.read_text() == "the-real-secret"

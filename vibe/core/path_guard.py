@@ -81,7 +81,13 @@ def protection_patterns(config: AnyVibeConfig) -> tuple[str, ...]:
     settings = config.privacy_routing
     if not settings.enabled:
         return ()
-    return (*DEFAULT_PROTECTED_PATHS, *settings.protected_paths)
+    # The secret vault directory is always protected: it holds plaintext
+    # secret values that the cloud model must never read. Imported lazily to
+    # avoid a config→store import cycle.
+    from vibe.core.secret_store import vault_dir
+
+    vault_glob = f"{vault_dir()}/**"
+    return (*DEFAULT_PROTECTED_PATHS, vault_glob, *settings.protected_paths)
 
 
 def _bash_path_candidates(command: str) -> Iterable[str]:

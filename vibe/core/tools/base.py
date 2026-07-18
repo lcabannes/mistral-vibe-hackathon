@@ -68,6 +68,11 @@ class InvokeContext:
     hook_config_result: HookConfigResult | None = field(default=None)
     session_id: str | None = field(default=None)
     mcp_pool: MCPConnectionPool | None = field(default=None)
+    # Vault secrets as VIBE_SECRET_* vars, injected into bash subprocess
+    # environments so `$VIBE_SECRET_...` expands locally. Populated for
+    # local-model subagents always, and for the main loop only when
+    # privacy_routing.expose_secrets_as_env is enabled.
+    secret_env: dict[str, str] = field(default_factory=dict)
 
 
 class ToolError(Exception):

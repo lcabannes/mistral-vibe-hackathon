@@ -152,7 +152,7 @@ class EventHandler:
         else:
             await container.remove()
 
-    async def handle_event(  # noqa: PLR0912
+    async def handle_event(  # noqa: PLR0912, PLR0915
         self, event: BaseEvent, loading_widget: LoadingWidget | None = None
     ) -> ToolCallMessage | None:
         match event:
@@ -176,26 +176,10 @@ class EventHandler:
                 await self.finalize_streaming()
                 await self._handle_secret_redacted(event)
             case PermissionSuggestionEvent():
-                await self.mount_callback(
-                    WarningMessage(
-                        f"💡 You've approved `{event.tool_name}` "
-                        f"(`{event.pattern}`) {event.approval_count} times "
-                        f"across sessions. Consider a permanent rule in "
-                        f"config.toml: [tools.{event.tool_name}] "
-                        f'allowlist = ["{event.pattern}"]',
-                        show_border=False,
-                    )
-                )
+                await self._handle_permission_suggestion(event)
             case RepeatedFailureEvent():
                 await self.finalize_streaming()
-                await self.mount_callback(
-                    WarningMessage(
-                        f"⚠ The same `{event.tool_name}` call has now failed "
-                        f"{event.failure_count} times in a row. The agent may "
-                        f"be stuck — consider interrupting and redirecting it.",
-                        show_border=False,
-                    )
-                )
+                await self._handle_repeated_failure(event)
             case CompactStartEvent():
                 await self.finalize_streaming()
                 await self._handle_compact_start()
@@ -359,12 +343,38 @@ class EventHandler:
             )
         await self.mount_callback(WarningMessage(msg, show_border=False))
 
+    async def _handle_permission_suggestion(
+        self, event: PermissionSuggestionEvent
+    ) -> None:
+        await self.mount_callback(
+            WarningMessage(
+                f"💡 You've approved `{event.tool_name}` (`{event.pattern}`) "
+                f"{event.approval_count} times across sessions. Consider a "
+                f"permanent rule in config.toml: [tools.{event.tool_name}] "
+                f'allowlist = ["{event.pattern}"]',
+                show_border=False,
+            )
+        )
+
+    async def _handle_repeated_failure(self, event: RepeatedFailureEvent) -> None:
+        await self.mount_callback(
+            WarningMessage(
+                f"⚠ The same `{event.tool_name}` call has now failed "
+                f"{event.failure_count} times in a row. The agent may be "
+                f"stuck — consider interrupting and redirecting it.",
+                show_border=False,
+            )
+        )
+
     async def _handle_secret_redacted(self, event: SecretRedactedEvent) -> None:
+        from vibe.core.secret_store import env_var_name
+
         await self.mount_callback(
             WarningMessage(
                 f"🔒 Secret detected and redacted: the model only sees "
-                f"`{event.placeholder}`. The real value stayed in your OS "
-                f"keychain (inspect with /secrets).",
+                f"`{event.placeholder}`. The real value stayed in your local "
+                f"vault, unreadable by the cloud model (inspect with /secrets). "
+                f"Commands can use it as `${env_var_name(event.placeholder)}`.",
                 show_border=False,
             )
         )

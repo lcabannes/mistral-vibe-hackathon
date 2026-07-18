@@ -10,6 +10,7 @@ from functools import wraps
 from http import HTTPStatus
 import inspect
 import json
+import logging
 import os
 from pathlib import Path
 import shutil
@@ -83,7 +84,7 @@ from vibe.core.privacy_routing import PrivacyRouter, find_sensitive_match
 from vibe.core.review import ReviewManager
 from vibe.core.rewind import RewindManager
 from vibe.core.scratchpad import init_scratchpad
-from vibe.core.secret_store import PersistentSecretStore
+from vibe.core.secret_store import PersistentSecretStore, vault_env_vars
 from vibe.core.session.session_id import extract_suffix, generate_session_id
 from vibe.core.session.session_logger import SessionLogger
 from vibe.core.session.session_migration import migrate_sessions_entrypoint
@@ -870,6 +871,31 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
     @property
     def privacy_router(self) -> PrivacyRouter:
         return self._privacy_router
+
+    def _resolve_secret_env(self) -> dict[str, str]:
+        """Vault secrets as env vars for tool subprocesses.
+
+        Local-model subagents (path-guard bypassed — the trust zone) always
+        get them; the cloud-facing loop only with expose_secrets_as_env, since
+        an `env` command there can echo values into cloud-bound tool output
+        (the redaction net re-masks them, but that makes it load-bearing).
+        """
+        # local_task subagents run with privacy_routing disabled (recursion
+        # guard), so the trust-zone marker is the path-guard bypass itself.
+        if self._bypass_path_guard:
+            allowed = True
+        else:
+            settings = self.config.privacy_routing
+            allowed = settings.enabled and settings.expose_secrets_as_env
+        if not allowed:
+            return {}
+        try:
+            return vault_env_vars()
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "Could not load vault secrets for tool env"
+            )
+            return {}
 
     def backend_factory(self, config: AnyVibeConfig | None = None) -> BackendLike:
         return self._injected_backend or self._select_backend(config)
@@ -2030,6 +2056,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 hook_config_result=self._hook_config_result,
                 session_id=self.session_id,
                 mcp_pool=self._mcp_pool,
+                secret_env=self._resolve_secret_env(),
             ),
             **tool_call.args_dict,
         ):

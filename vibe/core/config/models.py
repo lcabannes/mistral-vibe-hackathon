@@ -70,6 +70,13 @@ class PrivacyRoutingConfig(BaseSettings):
     # Send a 1-token completion at session start so the server loads model
     # weights before the first real (sensitive) task needs them.
     warmup: bool = True
+    # Inject vault secrets as VIBE_SECRET_* environment variables into bash
+    # subprocesses of the MAIN (cloud-facing) loop, so the model can write
+    # `$VIBE_SECRET_GITHUB_TOKEN_1` in commands and the shell expands it
+    # locally. Local-model subagents always get them. Off by default: with it
+    # on, `env`-style commands can echo values into tool output (the redaction
+    # net re-masks them, but that makes it load-bearing).
+    expose_secrets_as_env: bool = False
 
     @field_validator("custom_patterns")
     @classmethod

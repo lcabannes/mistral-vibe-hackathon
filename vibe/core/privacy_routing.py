@@ -75,10 +75,11 @@ class SecretVault:
     the egress boundary and rehydration at ingress, so the wire only ever
     carries placeholders.
 
-    With a ``PersistentSecretStore`` attached, values are written to the OS
-    keychain and placeholders stay globally stable across sessions (the store
-    owns the counter); a resumed session's placeholders resolve again. Without
-    one, the vault is purely in-memory and dies with the session.
+    With a ``PersistentSecretStore`` attached, values are written to a
+    protected on-disk vault file (readable by you and the local model, never
+    the cloud model) and placeholders stay globally stable across sessions
+    (the store owns the counter); a resumed session's placeholders resolve
+    again. Without one, the vault is purely in-memory and dies with the session.
     """
 
     def __init__(self, store: PersistentSecretStore | None = None) -> None:
@@ -125,7 +126,7 @@ class SecretVault:
             self._unannounced.append(placeholder)
 
     def forget(self, placeholder: str) -> bool:
-        """Drop a secret from memory and, when persistent, from the keychain."""
+        """Drop a secret from memory and, when persistent, from the vault file."""
         secret = self._by_placeholder.pop(placeholder, None)
         if secret is None:
             return False
@@ -229,7 +230,7 @@ class PrivacyRouter:
 
         Persistent secrets survive: they are keyed to placeholders that may
         appear in other sessions' logs. A persistent-store-backed vault is
-        rebuilt from the keychain; an in-memory vault is dropped entirely.
+        rebuilt from the vault file; an in-memory vault is dropped entirely.
         """
         self._scan_index = 0
         self._triggered_rule = None

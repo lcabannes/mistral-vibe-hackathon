@@ -83,7 +83,9 @@ def _get_shell_executable() -> str | None:
     return os.environ.get("SHELL")
 
 
-async def _spawn_command(command: str) -> asyncio.subprocess.Process:
+async def _spawn_command(
+    command: str, extra_env: dict[str, str] | None = None
+) -> asyncio.subprocess.Process:
     """Spawn ``command`` in the shell the current platform actually uses.
 
     On Windows we prefer a real bash (``bash -c``) when one is available so
@@ -92,6 +94,8 @@ async def _spawn_command(command: str) -> asyncio.subprocess.Process:
     describes the same resolved shell.
     """
     env = _get_base_env()
+    if extra_env:
+        env.update(extra_env)
 
     if is_windows():
         shell = resolve_windows_shell()
@@ -610,7 +614,9 @@ class Bash(
 
         proc = None
         try:
-            proc = await _spawn_command(args.command)
+            proc = await _spawn_command(
+                args.command, extra_env=ctx.secret_env if ctx else None
+            )
 
             try:
                 stdout_bytes, stderr_bytes = await asyncio.wait_for(
