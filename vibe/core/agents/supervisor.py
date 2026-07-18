@@ -123,7 +123,45 @@ class _ManagedAgent:
     closed: bool = False
     started_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
+    attention_base_state: ManagedAgentState | None = None
+    attention_base_activity: str | None = None
+    pending_attention: dict[int, str] = field(default_factory=dict)
+    next_attention_id: int = 1
     stop_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+
+class _ManagedEventSubscriber:
+    def __init__(self) -> None:
+        self._pending: dict[str, ManagedAgentLifecycleEvent] = {}
+        self._wake = asyncio.Event()
+        self._closed = False
+
+    def offer(self, event: ManagedAgentLifecycleEvent) -> bool:
+        if (
+            event.agent_id not in self._pending
+            and len(self._pending) >= MANAGED_AGENT_EVENT_QUEUE_SIZE
+        ):
+            return False
+        self._pending[event.agent_id] = event
+        self._wake.set()
+        return True
+
+    def replace(self, events: list[ManagedAgentLifecycleEvent]) -> None:
+        self._pending = {event.agent_id: event for event in events}
+        self._wake.set()
+
+    def close(self) -> None:
+        self._closed = True
+        self._wake.set()
+
+    async def get(self) -> ManagedAgentLifecycleEvent | None:
+        while not self._pending:
+            if self._closed:
+                return None
+            self._wake.clear()
+            await self._wake.wait()
+        agent_id = next(iter(self._pending))
+        return self._pending.pop(agent_id)
 
 
 class AgentSupervisor:
@@ -153,7 +191,7 @@ class AgentSupervisor:
         self._loop_factory = loop_factory or self._create_loop
         self._agents: dict[str, _ManagedAgent] = {}
         self._stopped_ids: deque[str] = deque()
-        self._subscribers: set[asyncio.Queue[ManagedAgentLifecycleEvent | None]] = set()
+        self._subscribers: set[_ManagedEventSubscriber] = set()
         self._next_agent_sequence = 1
         self._closed = False
 
@@ -279,17 +317,15 @@ class AgentSupervisor:
     ) -> AsyncGenerator[ManagedAgentLifecycleEvent, None]:
         if self._closed:
             return
-        queue: asyncio.Queue[ManagedAgentLifecycleEvent | None] = asyncio.Queue(
-            maxsize=MANAGED_AGENT_EVENT_QUEUE_SIZE
-        )
-        self._subscribers.add(queue)
+        subscriber = _ManagedEventSubscriber()
+        self._subscribers.add(subscriber)
         for agent in self._agents.values():
-            self._offer(queue, self._event(agent, advance=False))
+            subscriber.offer(self._event(agent, advance=False))
         try:
-            while (event := await queue.get()) is not None:
+            while (event := await subscriber.get()) is not None:
                 yield event
         finally:
-            self._subscribers.discard(queue)
+            self._subscribers.discard(subscriber)
 
     async def aclose(self) -> None:
         if self._closed:
@@ -298,8 +334,8 @@ class AgentSupervisor:
         self._closed = True
         subscribers = tuple(self._subscribers)
         self._subscribers.clear()
-        for queue in subscribers:
-            self._offer(queue, None)
+        for subscriber in subscribers:
+            subscriber.close()
 
     async def _run(self, agent: _ManagedAgent) -> None:
         while True:
@@ -360,15 +396,8 @@ class AgentSupervisor:
                 callback = self._approval_callback_getter()
                 if callback is None:
                     raise RuntimeError("Approval callback is no longer available")
-                previous_state = agent.state
-                previous_activity = agent.current_activity
-                self._transition(
-                    agent,
-                    ManagedAgentState.ATTENTION,
-                    current_activity=self._bounded(
-                        f"Approval needed for {tool_name}",
-                        MAX_MANAGED_AGENT_ACTIVITY_CHARS,
-                    ),
+                attention_id = self._begin_attention(
+                    agent, f"Approval needed for {tool_name}"
                 )
                 token = _set_managed_agent_callback_context(
                     ManagedAgentCallbackContext(
@@ -381,9 +410,7 @@ class AgentSupervisor:
                     )
                 finally:
                     _reset_managed_agent_callback_context(token)
-                    self._transition(
-                        agent, previous_state, current_activity=previous_activity
-                    )
+                    self._end_attention(agent, attention_id)
 
             agent.loop.set_approval_callback(tracked_approval_callback)
 
@@ -395,13 +422,7 @@ class AgentSupervisor:
                 callback = self._user_input_callback_getter()
                 if callback is None:
                     raise RuntimeError("User input callback is no longer available")
-                previous_state = agent.state
-                previous_activity = agent.current_activity
-                self._transition(
-                    agent,
-                    ManagedAgentState.ATTENTION,
-                    current_activity="Waiting for user input",
-                )
+                attention_id = self._begin_attention(agent, "Waiting for user input")
                 token = _set_managed_agent_callback_context(
                     ManagedAgentCallbackContext(
                         agent_id=agent.agent_id, profile=agent.profile
@@ -411,11 +432,45 @@ class AgentSupervisor:
                     return await callback(callback_args)
                 finally:
                     _reset_managed_agent_callback_context(token)
-                    self._transition(
-                        agent, previous_state, current_activity=previous_activity
-                    )
+                    self._end_attention(agent, attention_id)
 
             agent.loop.set_user_input_callback(tracked_user_input_callback)
+
+    def _begin_attention(self, agent: _ManagedAgent, activity: str) -> int | None:
+        if agent.terminal_emitted:
+            return None
+        if not agent.pending_attention:
+            agent.attention_base_state = agent.state
+            agent.attention_base_activity = agent.current_activity
+        attention_id = agent.next_attention_id
+        agent.next_attention_id += 1
+        bounded_activity = self._bounded(activity, MAX_MANAGED_AGENT_ACTIVITY_CHARS)
+        agent.pending_attention[attention_id] = bounded_activity
+        self._transition(
+            agent, ManagedAgentState.ATTENTION, current_activity=bounded_activity
+        )
+        return attention_id
+
+    def _end_attention(self, agent: _ManagedAgent, attention_id: int | None) -> None:
+        if attention_id is None:
+            return
+        agent.pending_attention.pop(attention_id, None)
+        if agent.terminal_emitted:
+            if not agent.pending_attention:
+                agent.attention_base_state = None
+                agent.attention_base_activity = None
+            return
+        if agent.pending_attention:
+            current_activity = next(reversed(agent.pending_attention.values()))
+            self._transition(
+                agent, ManagedAgentState.ATTENTION, current_activity=current_activity
+            )
+            return
+        base_state = agent.attention_base_state or ManagedAgentState.RUNNING
+        base_activity = agent.attention_base_activity
+        agent.attention_base_state = None
+        agent.attention_base_activity = None
+        self._transition(agent, base_state, current_activity=base_activity)
 
     def _transition(
         self,
@@ -427,6 +482,15 @@ class AgentSupervisor:
     ) -> None:
         if agent.terminal_emitted:
             return
+        if (
+            agent.pending_attention
+            and state is not ManagedAgentState.ATTENTION
+            and state is not ManagedAgentState.STOPPED
+        ):
+            agent.attention_base_state = state
+            agent.attention_base_activity = current_activity
+            state = ManagedAgentState.ATTENTION
+            current_activity = next(reversed(agent.pending_attention.values()))
         agent.state = state
         agent.current_activity = current_activity
         if error is not ...:
@@ -438,8 +502,12 @@ class AgentSupervisor:
     def _emit(self, agent: _ManagedAgent) -> None:
         agent.updated_at = time.time()
         event = self._event(agent, advance=True)
-        for queue in tuple(self._subscribers):
-            self._offer(queue, event)
+        for subscriber in tuple(self._subscribers):
+            if subscriber.offer(event):
+                continue
+            subscriber.replace([
+                self._event(current, advance=False) for current in self._agents.values()
+            ])
 
     def _event(
         self, agent: _ManagedAgent, *, advance: bool
@@ -464,16 +532,6 @@ class AgentSupervisor:
                 completion_tokens=agent.loop.stats.session_completion_tokens,
             ),
         )
-
-    @staticmethod
-    def _offer(
-        queue: asyncio.Queue[ManagedAgentLifecycleEvent | None],
-        event: ManagedAgentLifecycleEvent | None,
-    ) -> None:
-        if queue.full():
-            with suppress(asyncio.QueueEmpty):
-                queue.get_nowait()
-        queue.put_nowait(event)
 
     def _create_loop(
         self, profile: str, agent_type: AgentType, session_logging: SessionLoggingConfig

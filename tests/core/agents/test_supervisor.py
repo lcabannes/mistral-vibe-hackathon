@@ -17,7 +17,7 @@ from vibe.core.agents.events import (
 )
 from vibe.core.agents.manager import AgentManager
 from vibe.core.agents.models import AgentType, ManagedAgentState
-from vibe.core.agents.supervisor import AgentSupervisor
+from vibe.core.agents.supervisor import MANAGED_AGENT_EVENT_QUEUE_SIZE, AgentSupervisor
 from vibe.core.config import SessionLoggingConfig
 from vibe.core.config.orchestrator_legacy import LegacyConfigOrchestrator
 from vibe.core.tools.builtins.task import Task
@@ -278,8 +278,214 @@ async def test_supervisor_reports_tool_approval_and_question_attention() -> None
 
 
 @pytest.mark.asyncio
+async def test_overlapping_approvals_restore_base_after_final_resolution() -> None:
+    entered = {name: asyncio.Event() for name in ("first", "second")}
+    release = {name: asyncio.Event() for name in ("first", "second")}
+    callbacks_done = asyncio.Event()
+    finish_turn = asyncio.Event()
+    callback_tasks: list[asyncio.Task[tuple[ApprovalResponse, str | None]]] = []
+    loop: FakeManagedLoop
+
+    async def approval_callback(
+        tool_name: str,
+        args: BaseModel,
+        tool_call_id: str,
+        required_permissions: list[RequiredPermission] | None,
+    ) -> tuple[ApprovalResponse, str | None]:
+        entered[tool_call_id].set()
+        await release[tool_call_id].wait()
+        return ApprovalResponse.YES, None
+
+    async def act(_prompt: str) -> AsyncGenerator[BaseEvent, None]:
+        yield ToolCallEvent(tool_call_id="batch", tool_name="batch", tool_class=Task)
+        assert loop.approval_callback is not None
+
+        async def request_approval(
+            tool_name: str, question: str, tool_call_id: str
+        ) -> tuple[ApprovalResponse, str | None]:
+            assert loop.approval_callback is not None
+            return await loop.approval_callback(
+                tool_name, QuestionArgs(question=question), tool_call_id, None
+            )
+
+        callback_tasks.extend([
+            asyncio.create_task(
+                request_approval("first_tool", "approve first?", "first")
+            ),
+            asyncio.create_task(
+                request_approval("second_tool", "approve second?", "second")
+            ),
+        ])
+        await asyncio.gather(*callback_tasks)
+        callbacks_done.set()
+        await finish_turn.wait()
+        yield AssistantEvent(content="done")
+
+    def factory(
+        profile: str, agent_type: AgentType, logging: SessionLoggingConfig
+    ) -> FakeManagedLoop:
+        nonlocal loop
+        loop = FakeManagedLoop(act)
+        return loop
+
+    supervisor = make_supervisor(factory=factory, approval_callback=approval_callback)
+    started = await supervisor.start("default", "work")
+    await asyncio.wait_for(entered["first"].wait(), timeout=2)
+    await asyncio.wait_for(entered["second"].wait(), timeout=2)
+    assert supervisor.output(started.agent_id).state is ManagedAgentState.ATTENTION
+
+    release["second"].set()
+    await asyncio.wait_for(asyncio.shield(callback_tasks[1]), timeout=2)
+    one_pending = supervisor.output(started.agent_id)
+    assert one_pending.state is ManagedAgentState.ATTENTION
+    assert one_pending.current_activity == "Approval needed for first_tool"
+
+    release["first"].set()
+    await asyncio.wait_for(callbacks_done.wait(), timeout=2)
+    none_pending = supervisor.output(started.agent_id)
+    assert none_pending.state is ManagedAgentState.WORKING
+    assert none_pending.current_activity == "Running batch"
+
+    finish_turn.set()
+    while supervisor.output(started.agent_id).state is not ManagedAgentState.IDLE:
+        await asyncio.sleep(0)
+    await supervisor.aclose()
+
+
+@pytest.mark.asyncio
+async def test_approval_and_question_stay_attention_when_question_is_cancelled() -> (
+    None
+):
+    approval_entered = asyncio.Event()
+    approval_release = asyncio.Event()
+    question_entered = asyncio.Event()
+    callbacks_done = asyncio.Event()
+    finish_turn = asyncio.Event()
+    approval_task: asyncio.Task[tuple[ApprovalResponse, str | None]] | None = None
+    question_task: asyncio.Task[BaseModel] | None = None
+    loop: FakeManagedLoop
+
+    async def approval_callback(
+        tool_name: str,
+        args: BaseModel,
+        tool_call_id: str,
+        required_permissions: list[RequiredPermission] | None,
+    ) -> tuple[ApprovalResponse, str | None]:
+        approval_entered.set()
+        await approval_release.wait()
+        return ApprovalResponse.YES, None
+
+    async def user_input_callback(args: BaseModel) -> BaseModel:
+        question_entered.set()
+        await asyncio.Event().wait()
+        return args
+
+    async def act(_prompt: str) -> AsyncGenerator[BaseEvent, None]:
+        nonlocal approval_task, question_task
+        yield ToolCallEvent(tool_call_id="batch", tool_name="batch", tool_class=Task)
+        assert loop.approval_callback is not None
+        assert loop.user_input_callback is not None
+
+        async def request_approval() -> tuple[ApprovalResponse, str | None]:
+            assert loop.approval_callback is not None
+            return await loop.approval_callback(
+                "write_file", QuestionArgs(question="approve?"), "approval", None
+            )
+
+        async def request_user_input() -> BaseModel:
+            assert loop.user_input_callback is not None
+            return await loop.user_input_callback(QuestionArgs(question="continue?"))
+
+        approval_task = asyncio.create_task(request_approval())
+        question_task = asyncio.create_task(request_user_input())
+        await asyncio.gather(approval_task, question_task, return_exceptions=True)
+        callbacks_done.set()
+        await finish_turn.wait()
+        yield AssistantEvent(content="done")
+
+    def factory(
+        profile: str, agent_type: AgentType, logging: SessionLoggingConfig
+    ) -> FakeManagedLoop:
+        nonlocal loop
+        loop = FakeManagedLoop(act)
+        return loop
+
+    supervisor = make_supervisor(
+        factory=factory,
+        approval_callback=approval_callback,
+        user_input_callback=user_input_callback,
+    )
+    started = await supervisor.start("default", "work")
+    await asyncio.wait_for(approval_entered.wait(), timeout=2)
+    await asyncio.wait_for(question_entered.wait(), timeout=2)
+
+    assert question_task is not None
+    question_task.cancel()
+    await asyncio.gather(question_task, return_exceptions=True)
+    one_pending = supervisor.output(started.agent_id)
+    assert one_pending.state is ManagedAgentState.ATTENTION
+    assert one_pending.current_activity == "Approval needed for write_file"
+
+    approval_release.set()
+    await asyncio.wait_for(callbacks_done.wait(), timeout=2)
+    none_pending = supervisor.output(started.agent_id)
+    assert none_pending.state is ManagedAgentState.WORKING
+    assert none_pending.current_activity == "Running batch"
+
+    finish_turn.set()
+    while supervisor.output(started.agent_id).state is not ManagedAgentState.IDLE:
+        await asyncio.sleep(0)
+    await supervisor.aclose()
+
+
+@pytest.mark.asyncio
+async def test_stop_takes_precedence_over_pending_attention() -> None:
+    approval_entered = asyncio.Event()
+    loop: FakeManagedLoop
+
+    async def approval_callback(
+        tool_name: str,
+        args: BaseModel,
+        tool_call_id: str,
+        required_permissions: list[RequiredPermission] | None,
+    ) -> tuple[ApprovalResponse, str | None]:
+        approval_entered.set()
+        await asyncio.Event().wait()
+        return ApprovalResponse.YES, None
+
+    async def act(_prompt: str) -> AsyncGenerator[BaseEvent, None]:
+        yield ToolCallEvent(
+            tool_call_id="tool", tool_name="write_file", tool_class=Task
+        )
+        assert loop.approval_callback is not None
+        await loop.approval_callback(
+            "write_file", QuestionArgs(question="approve?"), "approval", None
+        )
+
+    def factory(
+        profile: str, agent_type: AgentType, logging: SessionLoggingConfig
+    ) -> FakeManagedLoop:
+        nonlocal loop
+        loop = FakeManagedLoop(act)
+        return loop
+
+    supervisor = make_supervisor(factory=factory, approval_callback=approval_callback)
+    started = await supervisor.start("default", "work")
+    await asyncio.wait_for(approval_entered.wait(), timeout=2)
+    assert supervisor.output(started.agent_id).state is ManagedAgentState.ATTENTION
+
+    stopped = await supervisor.stop(started.agent_id)
+    await asyncio.sleep(0)
+
+    assert stopped.state is ManagedAgentState.STOPPED
+    assert supervisor.output(started.agent_id).state is ManagedAgentState.STOPPED
+    await supervisor.aclose()
+
+
+@pytest.mark.asyncio
 async def test_supervisor_bounds_prompts_queue_output_and_error() -> None:
     release = asyncio.Event()
+    fail_release = asyncio.Event()
     calls = 0
 
     async def act(prompt: str) -> AsyncGenerator[BaseEvent, None]:
@@ -289,6 +495,7 @@ async def test_supervisor_bounds_prompts_queue_output_and_error() -> None:
             await release.wait()
             yield AssistantEvent(content="x" * (MAX_MANAGED_AGENT_RESPONSE_CHARS + 25))
             return
+        await fail_release.wait()
         raise RuntimeError("failure " + "y" * 3_000)
         yield
 
@@ -299,15 +506,19 @@ async def test_supervisor_bounds_prompts_queue_output_and_error() -> None:
     started = await supervisor.start("default", task)
     await first
     await next_event(events, ManagedAgentState.RUNNING)
-    for index in range(20):
-        await supervisor.message(started.agent_id, f"queued {index}")
-    with pytest.raises(ValueError, match="too many queued messages"):
-        await supervisor.message(started.agent_id, "overflow")
     assert len(loop.prompts[0]) == MAX_MANAGED_AGENT_TASK_CHARS
 
     release.set()
     idle = await next_event(events, ManagedAgentState.IDLE)
     assert len(idle.last_response) == MAX_MANAGED_AGENT_RESPONSE_CHARS
+
+    await supervisor.message(started.agent_id, "failure prompt")
+    await next_event(events, ManagedAgentState.RUNNING)
+    for index in range(20):
+        await supervisor.message(started.agent_id, f"queued {index}")
+    with pytest.raises(ValueError, match="too many queued messages"):
+        await supervisor.message(started.agent_id, "overflow")
+    fail_release.set()
     failed = await next_event(events, ManagedAgentState.FAILED)
     assert len(failed.error or "") == 2_000
     await supervisor.aclose()
@@ -336,6 +547,64 @@ async def test_session_change_stops_workers_and_clears_old_registry() -> None:
     assert stopped.agent_id == started.agent_id
     assert supervisor.list() == ()
     assert loop.closed is True
+    await supervisor.aclose()
+    await events.aclose()
+
+
+@pytest.mark.asyncio
+async def test_slow_subscriber_converges_to_every_agent_after_overflow() -> None:
+    release = asyncio.Event()
+    loops: list[FakeManagedLoop] = []
+
+    async def act(_prompt: str) -> AsyncGenerator[BaseEvent, None]:
+        await release.wait()
+        yield AssistantEvent(content="done")
+
+    def factory(
+        profile: str, agent_type: AgentType, logging: SessionLoggingConfig
+    ) -> FakeManagedLoop:
+        loop = FakeManagedLoop(act)
+        loop.session_id = f"child-{len(loops) + 1}"
+        loops.append(loop)
+        return loop
+
+    supervisor = make_supervisor(factory=factory)
+    events = supervisor.subscribe_events()
+    first_event = asyncio.create_task(anext(events))
+    await asyncio.sleep(0)
+    started = [
+        await supervisor.start("default", f"task {index}", name=f"worker-{index}")
+        for index in range(8)
+    ]
+    while any(
+        supervisor.output(agent.agent_id).state is not ManagedAgentState.RUNNING
+        for agent in started
+    ):
+        await asyncio.sleep(0)
+    await first_event
+
+    await supervisor.stop(started[0].agent_id)
+    published_updates = 0
+    for agent in started[1:]:
+        for index in range(10):
+            await supervisor.message(agent.agent_id, f"queued {index}")
+            published_updates += 1
+    assert published_updates > MANAGED_AGENT_EVENT_QUEUE_SIZE
+
+    latest: dict[str, ManagedAgentLifecycleEvent] = {}
+    async with asyncio.timeout(2):
+        while len(latest) < len(started):
+            event = await anext(events)
+            latest[event.agent_id] = event
+
+    assert set(latest) == {agent.agent_id for agent in started}
+    for agent_id, event in latest.items():
+        snapshot = supervisor.output(agent_id)
+        assert event.state is snapshot.state
+        assert event.queued_messages == snapshot.queued_messages
+        assert event.current_activity == snapshot.current_activity
+    assert latest[started[0].agent_id].state is ManagedAgentState.STOPPED
+
     await supervisor.aclose()
     await events.aclose()
 
