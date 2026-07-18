@@ -8,9 +8,8 @@ const CONTROLLABLE_STATES = new Set([
   "idle",
   "failed",
 ]);
-const TERMINAL_STATES = new Set(["completed", "cancelled"]);
+const TERMINAL_STATES = new Set(["completed", "cancelled", "stopped"]);
 const ATTENTION_STATES = new Set(["attention", "failed"]);
-const PAST_STATES = TERMINAL_STATES;
 const COORDINATION_GROUP = {
   id: "coordination",
   name: "Coordination",
@@ -31,6 +30,7 @@ const STATE_META = {
   failed: { label: "Failed", color: "#e10500" },
   completed: { label: "Finished", color: "#16835f" },
   cancelled: { label: "Cancelled", color: "#73737d" },
+  stopped: { label: "Stopped", color: "#73737d" },
 };
 
 const COATS = {
@@ -49,6 +49,7 @@ const state = {
   agents: [],
   groups: [],
   profiles: [],
+  tools: [],
   coordination: null,
   network: null,
   connected: false,
@@ -64,8 +65,10 @@ const state = {
   lastSnapshot: "",
   agentDialogOrigin: null,
   chatDrafts: new Map(),
+  chatAttachments: new Map(),
   chatErrors: new Map(),
   composerSelections: new Map(),
+  chatScroll: new Map(),
   pendingRequests: new Set(),
 };
 
@@ -97,6 +100,9 @@ const elements = {
   agentGroup: document.querySelector("#agent-group"),
   agentProfile: document.querySelector("#agent-profile"),
   agentTask: document.querySelector("#agent-task"),
+  agentAutoApprove: document.querySelector("#agent-auto-approve"),
+  agentToolsAll: document.querySelector("#agent-tools-all"),
+  agentToolList: document.querySelector("#agent-tool-list"),
   agentSubmit: document.querySelector("#agent-submit"),
   agentDialogNotice: document.querySelector("#agent-dialog-notice"),
   agentDialogError: document.querySelector("#agent-dialog-error"),
@@ -159,6 +165,7 @@ async function loadRoom() {
     state.connected = live.connected === true;
     state.bridgeSeen = state.connected;
     state.profiles = Array.isArray(live.profiles) ? live.profiles : [];
+    state.tools = Array.isArray(live.tools) ? live.tools : [];
     state.coordination = live.coordination || null;
     state.network = live.network || null;
     state.agents = normalizeAgents(live.activities, groupIds, stored);
@@ -227,6 +234,7 @@ async function refreshLiveRuns() {
     state.connected = true;
     state.bridgeSeen = true;
     state.profiles = Array.isArray(payload.profiles) ? payload.profiles : state.profiles;
+    state.tools = Array.isArray(payload.tools) ? payload.tools : state.tools;
     state.coordination = payload.coordination || state.coordination;
     state.network = payload.network || state.network;
     updateNetworkStatus();
@@ -255,7 +263,7 @@ function isValidGroup(group) {
 function statusMatches(agent) {
   if (state.statusFilter === "live") return agent.runtime_live === true;
   if (state.statusFilter === "attention") return ATTENTION_STATES.has(agent.state);
-  if (state.statusFilter === "past") return PAST_STATES.has(agent.state);
+  if (state.statusFilter === "past") return agent.runtime_live !== true;
   return true;
 }
 
@@ -576,6 +584,7 @@ function syncDetailModality() {
 }
 
 function renderDetails() {
+  captureChatScroll();
   const agent = getAgent(state.selectedAgentId);
   if (!agent) {
     closeDetails({ restoreFocus: false });
@@ -612,7 +621,7 @@ function renderDetails() {
     ? "Control agent"
     : agent.runtime_live
       ? "Isolated worker"
-      : "Past run";
+      : "Retained worker";
   title.append(source);
   const detailState = document.createElement("span");
   detailState.className = "detail-state";
@@ -655,6 +664,15 @@ function renderDetails() {
   const selection = state.composerSelections.get(agent.tool_call_id);
   if (composer && selection) {
     composer.setSelectionRange(selection[0], selection[1]);
+  }
+  const transcript = elements.detailContent.querySelector(".transcript");
+  if (transcript) {
+    const saved = state.chatScroll.get(agent.tool_call_id);
+    requestAnimationFrame(() => {
+      transcript.scrollTop = saved?.stickToBottom === false
+        ? saved.top
+        : transcript.scrollHeight;
+    });
   }
 }
 
@@ -740,7 +758,13 @@ function renderStatusView(agent, stateMeta) {
     );
   } else if (!agent.runtime_live && !agent.is_orchestrator) {
     controlActions.append(
-      actionButton("Relaunch", (event) => relaunchAgent(agent, event.currentTarget)),
+      actionButton("Continue chat", () => {
+        state.detailView = "chat";
+        renderDetails();
+        requestAnimationFrame(() =>
+          elements.detailContent.querySelector(".chat-composer textarea")?.focus(),
+        );
+      }),
     );
   }
   groupSection.append(groupLabel, controlActions);
@@ -786,6 +810,14 @@ function renderChatView(agent) {
   const transcript = document.createElement("div");
   transcript.className = "transcript";
   transcript.dataset.agentTranscript = agent.tool_call_id;
+  transcript.addEventListener("scroll", () => {
+    const distanceFromBottom =
+      transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight;
+    state.chatScroll.set(agent.tool_call_id, {
+      top: transcript.scrollTop,
+      stickToBottom: distanceFromBottom < 36,
+    });
+  });
   const messages = Array.isArray(agent.conversation) ? agent.conversation : [];
   if (messages.length === 0) {
     transcript.append(emptyPanel("No conversation has been reported for this run yet."));
@@ -809,6 +841,14 @@ function renderChatView(agent) {
       status.className = "message-status";
       status.textContent = formatMessageStatus(message.status);
       bubble.append(role, content);
+      if (Array.isArray(message.attachments) && message.attachments.length > 0) {
+        const attachments = document.createElement("span");
+        attachments.className = "message-attachments";
+        attachments.textContent = message.attachments
+          .map((attachment) => attachment.alias || "Image")
+          .join(" · ");
+        bubble.append(attachments);
+      }
       if (message.status && message.status !== "succeeded") bubble.append(status);
       transcript.append(bubble);
     }
@@ -836,12 +876,18 @@ function renderChatView(agent) {
     error.textContent = chatError;
     section.append(error);
   }
-  if (agent.runtime_live && state.connected) {
+  if (agent.source === "live") {
+    if (!agent.runtime_live) {
+      const notice = document.createElement("p");
+      notice.className = "bridge-notice";
+      notice.textContent = "Stopped · the next message resumes this conversation.";
+      section.append(notice);
+    }
     section.append(renderComposer(agent));
   } else {
     const notice = document.createElement("p");
     notice.className = "bridge-notice";
-    notice.textContent = "This transcript is retained, but the worker is stopped.";
+    notice.textContent = "Demo transcript · connect the Agent Room to chat.";
     section.append(notice);
   }
   return section;
@@ -850,6 +896,27 @@ function renderChatView(agent) {
 function renderComposer(agent) {
   const wrapper = document.createElement("div");
   wrapper.className = "composer-wrap";
+  const attachedImages = state.chatAttachments.get(agent.tool_call_id) || [];
+  const attachmentList = document.createElement("div");
+  attachmentList.className = "attachment-list";
+  attachmentList.hidden = attachedImages.length === 0;
+  for (const [index, attachment] of attachedImages.entries()) {
+    const item = document.createElement("span");
+    item.textContent = attachment.alias;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.textContent = "×";
+    remove.title = `Remove ${attachment.alias}`;
+    remove.setAttribute("aria-label", remove.title);
+    remove.addEventListener("click", () => {
+      const next = [...attachedImages];
+      next.splice(index, 1);
+      state.chatAttachments.set(agent.tool_call_id, next);
+      renderDetails();
+    });
+    item.append(remove);
+    attachmentList.append(item);
+  }
   const commandMenu = document.createElement("div");
   commandMenu.className = "command-menu";
   commandMenu.hidden = true;
@@ -868,8 +935,11 @@ function renderComposer(agent) {
   const send = document.createElement("button");
   send.type = "submit";
   send.className = "button button-orange composer-send";
-  send.textContent = "Send";
-  send.disabled = state.pendingRequests.has(agent.tool_call_id) || !textarea.value.trim();
+  send.textContent = agent.runtime_live ? "Send" : "Resume & send";
+  send.disabled =
+    !state.connected ||
+    state.pendingRequests.has(agent.tool_call_id) ||
+    !textarea.value.trim();
 
   const updateCommandMenu = () => {
     const query = textarea.value.trim().toLowerCase();
@@ -888,7 +958,7 @@ function renderComposer(agent) {
         textarea.value = command;
         state.chatDrafts.set(agent.tool_call_id, command);
         commandMenu.hidden = true;
-        send.disabled = false;
+        send.disabled = !state.connected;
         textarea.focus();
       });
       commandMenu.append(option);
@@ -896,7 +966,10 @@ function renderComposer(agent) {
   };
   textarea.addEventListener("input", () => {
     state.chatDrafts.set(agent.tool_call_id, textarea.value);
-    send.disabled = state.pendingRequests.has(agent.tool_call_id) || !textarea.value.trim();
+    send.disabled =
+      !state.connected ||
+      state.pendingRequests.has(agent.tool_call_id) ||
+      !textarea.value.trim();
     updateCommandMenu();
   });
   textarea.addEventListener("keydown", (event) => {
@@ -921,8 +994,39 @@ function renderComposer(agent) {
     ? `${agent.queued_messages} queued`
     : agent.state === "failed"
       ? "Ready to retry"
-      : "Ready";
-  if (ACTIVE_STATES.has(agent.state)) {
+      : state.connected
+        ? agent.runtime_live
+          ? "Ready"
+          : "Ready to resume"
+        : "Bridge disconnected";
+  const attachInput = document.createElement("input");
+  attachInput.type = "file";
+  attachInput.accept = "image/png,image/jpeg,image/gif,image/webp";
+  attachInput.multiple = true;
+  attachInput.hidden = true;
+  const attach = document.createElement("button");
+  attach.type = "button";
+  attach.className = "button composer-attach";
+  attach.textContent = "+ Image";
+  attach.disabled = !state.connected || attachedImages.length >= 4;
+  attach.addEventListener("click", () => attachInput.click());
+  attachInput.addEventListener("change", async () => {
+    try {
+      const remaining = Math.max(0, 4 - attachedImages.length);
+      const files = [...attachInput.files].slice(0, remaining);
+      const additions = await Promise.all(files.map(imageAttachmentFromFile));
+      state.chatAttachments.set(agent.tool_call_id, [
+        ...attachedImages,
+        ...additions,
+      ]);
+      state.chatErrors.delete(agent.tool_call_id);
+    } catch (error) {
+      state.chatErrors.set(agent.tool_call_id, error.message);
+    }
+    renderDetails();
+  });
+  queue.prepend(attach, attachInput);
+  if (agent.runtime_live && ACTIVE_STATES.has(agent.state)) {
     const cancel = document.createElement("button");
     cancel.type = "button";
     cancel.className = "button composer-cancel";
@@ -930,9 +1034,21 @@ function renderComposer(agent) {
     cancel.addEventListener("click", () => void cancelRun(agent.tool_call_id));
     queue.append(cancel);
   }
-  wrapper.append(commandMenu, form, queue);
+  wrapper.append(attachmentList, commandMenu, form, queue);
   updateCommandMenu();
   return wrapper;
+}
+
+async function imageAttachmentFromFile(file) {
+  const allowed = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+  if (!allowed.has(file.type)) throw new Error(`${file.name} is not a supported image`);
+  if (file.size > 4 * 1024 * 1024) throw new Error(`${file.name} is larger than 4 MB`);
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += 32768) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 32768));
+  }
+  return { alias: file.name, mime_type: file.type, data: btoa(binary) };
 }
 
 function renderApprovalRequest(agent, approval) {
@@ -1145,13 +1261,15 @@ async function sendAgentMessage(agentId, rawContent) {
   const content = rawContent.trim();
   if (!content || state.pendingRequests.has(agentId)) return;
   const agent = getAgent(agentId);
-  if (!agent?.runtime_live) return;
+  if (!agent || agent.source !== "live" || !state.connected) return;
+  const images = state.chatAttachments.get(agentId) || [];
   const clientMessageId = crypto.randomUUID();
   const optimistic = {
     id: `optimistic-${clientMessageId}`,
     client_message_id: clientMessageId,
     role: "user",
     content,
+    attachments: images.map(({ alias, mime_type }) => ({ alias, mime_type })),
     status: "queued",
     created_at: Date.now() / 1000,
   };
@@ -1166,11 +1284,16 @@ async function sendAgentMessage(agentId, rawContent) {
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content, client_message_id: clientMessageId }),
+        body: JSON.stringify({
+          content,
+          images,
+          client_message_id: clientMessageId,
+        }),
       },
     );
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || `Send failed (${response.status})`);
+    state.chatAttachments.delete(agentId);
     state.lastSnapshot = "";
     await refreshLiveRuns();
   } catch (error) {
@@ -1229,6 +1352,7 @@ async function postAgentAction(agentId, action, body) {
 }
 
 function captureComposerState() {
+  captureChatScroll();
   const composer = elements.detailContent.querySelector(".chat-composer textarea");
   if (!composer || !state.selectedAgentId) return;
   state.chatDrafts.set(state.selectedAgentId, composer.value);
@@ -1238,8 +1362,16 @@ function captureComposerState() {
   ]);
 }
 
-function relaunchAgent(agent, origin) {
-  openAgentDialog(agent.group_id, origin, agent);
+function captureChatScroll() {
+  const transcript = elements.detailContent.querySelector(".transcript");
+  const agentId = transcript?.dataset.agentTranscript;
+  if (!transcript || !agentId) return;
+  const distanceFromBottom =
+    transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight;
+  state.chatScroll.set(agentId, {
+    top: transcript.scrollTop,
+    stickToBottom: distanceFromBottom < 36,
+  });
 }
 
 function appendDetailData(list, label, value) {
@@ -1365,7 +1497,7 @@ function createGroup() {
   render();
 }
 
-function openAgentDialog(groupId, origin, agent = null) {
+function openAgentDialog(groupId, origin) {
   state.agentDialogOrigin = origin || elements.newAgentButton;
   elements.agentForm.reset();
   elements.agentDialogError.hidden = true;
@@ -1393,13 +1525,13 @@ function openAgentDialog(groupId, origin, agent = null) {
       option.textContent = profile.display_name || profile.name;
       elements.agentProfile.append(option);
     }
+    const preferredProfile = state.profiles.find(
+      (profile) => profile.name === "auto-approve",
+    );
+    if (preferredProfile) elements.agentProfile.value = preferredProfile.name;
   }
-
-  if (agent) {
-    elements.agentName.value = agent.agent_display_name;
-    elements.agentProfile.value = agent.agent_name;
-    elements.agentTask.value = agent.task;
-  }
+  elements.agentAutoApprove.checked = true;
+  renderAgentToolPicker();
 
   elements.agentSubmit.disabled = !state.connected;
   elements.agentSubmit.textContent = state.connected ? "Launch agent" : "Bridge unavailable";
@@ -1408,18 +1540,46 @@ function openAgentDialog(groupId, origin, agent = null) {
   requestAnimationFrame(() => elements.agentName.focus());
 }
 
+function renderAgentToolPicker() {
+  elements.agentToolList.replaceChildren();
+  for (const tool of state.tools) {
+    const label = document.createElement("label");
+    label.className = "tool-option";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.value = tool.name;
+    checkbox.checked = true;
+    const name = document.createElement("span");
+    name.textContent = tool.display_name || tool.name;
+    label.append(checkbox, name);
+    elements.agentToolList.append(label);
+  }
+  syncAgentToolSelection();
+}
+
+function syncAgentToolSelection() {
+  const tools = [...elements.agentToolList.querySelectorAll('input[type="checkbox"]')];
+  const checked = tools.filter((tool) => tool.checked).length;
+  elements.agentToolsAll.checked = tools.length > 0 && checked === tools.length;
+  elements.agentToolsAll.indeterminate = checked > 0 && checked < tools.length;
+  updateAgentLaunchNotice();
+}
+
+function selectedAgentTools() {
+  return [...elements.agentToolList.querySelectorAll('input[type="checkbox"]:checked')]
+    .map((tool) => tool.value);
+}
+
 function updateAgentLaunchNotice() {
   if (!state.connected) {
     elements.agentDialogNotice.textContent =
       "This page is using demo data. Start server.py to enable real Vibe runs.";
     return;
   }
-  const profile = state.profiles.find(
-    (candidate) => candidate.name === elements.agentProfile.value,
-  );
-  const safety = profile?.safety ? ` ${profile.safety} permissions.` : "";
+  const toolCount = selectedAgentTools().length;
+  const approval = elements.agentAutoApprove.checked ? "Auto-approve" : "Ask first";
   elements.agentDialogNotice.textContent =
-    `A dedicated Git worktree, branch, and persistent Vibe process will be created.${safety}`;
+    `${approval} · ${toolCount} tool${toolCount === 1 ? "" : "s"} · isolated worktree`;
 }
 
 async function createAgentRun() {
@@ -1435,6 +1595,8 @@ async function createAgentRun() {
         display_name: elements.agentName.value.trim(),
         task: elements.agentTask.value.trim(),
         group_id: elements.agentGroup.value,
+        enabled_tools: selectedAgentTools(),
+        auto_approve: elements.agentAutoApprove.checked,
         client_message_id: crypto.randomUUID(),
       }),
     });
@@ -1534,6 +1696,14 @@ function bindEvents() {
     state.agentDialogOrigin = null;
   });
   elements.agentProfile.addEventListener("change", updateAgentLaunchNotice);
+  elements.agentAutoApprove.addEventListener("change", updateAgentLaunchNotice);
+  elements.agentToolsAll.addEventListener("change", () => {
+    for (const tool of elements.agentToolList.querySelectorAll('input[type="checkbox"]')) {
+      tool.checked = elements.agentToolsAll.checked;
+    }
+    syncAgentToolSelection();
+  });
+  elements.agentToolList.addEventListener("change", syncAgentToolSelection);
 
   elements.simulateButton.addEventListener("click", () => {
     state.motionPaused = !state.motionPaused;

@@ -30,6 +30,7 @@ from vibe.core.control_port import (
     CLIControlResult,
 )
 from vibe.core.hooks.config import load_hooks_from_fs
+from vibe.core.session.session_loader import SessionLoader
 from vibe.core.telemetry.build_metadata import build_launch_context
 from vibe.core.tools.base import ToolPermission
 from vibe.core.tools.builtins.ask_user_question import (
@@ -41,6 +42,7 @@ from vibe.core.tools.permissions import RequiredPermission
 from vibe.core.types import (
     ApprovalResponse,
     AssistantEvent,
+    ImageAttachment,
     ToolCallEvent,
     ToolResultEvent,
 )
@@ -118,9 +120,20 @@ class RemoteControlPort:
 
 
 class WorkerBridge:
-    def __init__(self, profile: str, session_root: Path) -> None:
+    def __init__(
+        self,
+        profile: str,
+        session_root: Path,
+        *,
+        disabled_tools: tuple[str, ...] = (),
+        resume_session_id: str | None = None,
+        auto_approve: bool = False,
+    ) -> None:
         self.profile = profile
         self.session_root = session_root
+        self.disabled_tools = disabled_tools
+        self.resume_session_id = resume_session_id
+        self.auto_approve = auto_approve
         self.agent_loop: AgentLoop | None = None
         self.management = RemoteAgentManagement(self)
         self.prompt_queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(
@@ -141,6 +154,9 @@ class WorkerBridge:
             session_prefix=f"room-{self.profile}",
             enabled=True,
         )
+        config.disabled_tools = list(
+            dict.fromkeys([*config.disabled_tools, *self.disabled_tools])
+        )
         agent_loop = AgentLoop(
             LegacyConfigOrchestrator(config),
             agent_name=self.profile,
@@ -157,6 +173,7 @@ class WorkerBridge:
                 client_version=__version__,
             ),
             hook_config_result=load_hooks_from_fs(),
+            force_bypass_tool_permissions=self.auto_approve,
         )
         self.agent_loop = agent_loop
         agent_loop.set_approval_callback(self._approval_callback)
@@ -179,13 +196,39 @@ integration branch. Your own worktree is for coordination, not implementation.
 """.strip()
             )
 
+        resumed = False
+        resume_error: str | None = None
+        if self.resume_session_id:
+            try:
+                session_path = SessionLoader.find_session_by_id(
+                    self.resume_session_id, config.session_logging
+                )
+                if session_path is None:
+                    raise ValueError("Saved Vibe session was not found")
+                loaded_messages, metadata = SessionLoader.load_session(session_path)
+                agent_loop.messages.extend(loaded_messages)
+                loaded_session_id = metadata.get("session_id", self.resume_session_id)
+                agent_loop.session_id = loaded_session_id
+                agent_loop.parent_session_id = metadata.get("parent_session_id")
+                agent_loop.session_logger.resume_existing_session(
+                    loaded_session_id, session_path
+                )
+                await agent_loop.hydrate_experiments_from_session()
+                resumed = True
+            except (OSError, ValueError) as error:
+                resume_error = self._safe_error(error)
+
         model = agent_loop.config.get_active_model()
         self.emit({
             "type": "ready",
             "session_id": agent_loop.session_id,
+            "parent_session_id": agent_loop.parent_session_id,
             "profile": self.profile,
             "model": model.alias,
             "context_limit": model.auto_compact_threshold,
+            "resume_requested": bool(self.resume_session_id),
+            "resumed": resumed,
+            "resume_error": resume_error,
         })
         input_task = asyncio.create_task(self._input_loop(), name="room-worker-input")
         prompt_task = asyncio.create_task(
@@ -277,6 +320,12 @@ integration branch. Your own worktree is for coordination, not implementation.
         assert self.agent_loop is not None
         message_id = str(prompt.get("message_id") or uuid4().hex)
         content = str(prompt.get("content") or "").strip()
+        raw_images = prompt.get("images")
+        images = (
+            [ImageAttachment.model_validate(item) for item in raw_images]
+            if isinstance(raw_images, list)
+            else []
+        )
         self.emit({
             "type": "state",
             "state": "running",
@@ -286,7 +335,9 @@ integration branch. Your own worktree is for coordination, not implementation.
         })
         response = ""
         try:
-            async with aclosing(self.agent_loop.act(content)) as events:
+            async with aclosing(
+                self.agent_loop.act(content, images=images or None)
+            ) as events:
                 async for event in events:
                     if isinstance(event, AssistantEvent) and event.content:
                         response += event.content
@@ -440,6 +491,8 @@ integration branch. Your own worktree is for coordination, not implementation.
             "context_limit": model.auto_compact_threshold,
             "estimated_cost_usd": stats.session_cost,
             "model": model.alias,
+            "session_id": self.agent_loop.session_id,
+            "parent_session_id": self.agent_loop.parent_session_id,
         })
 
     @staticmethod
@@ -475,6 +528,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile", required=True)
     parser.add_argument("--session-root", type=Path, required=True)
+    parser.add_argument("--disable-tool", action="append", default=[])
+    parser.add_argument("--resume-session")
+    parser.add_argument("--auto-approve", action="store_true")
     return parser.parse_args()
 
 
@@ -482,7 +538,14 @@ def main() -> None:
     args = parse_args()
     os.environ.setdefault("PYTHONUNBUFFERED", "1")
     init_harness_files_manager("user", "project")
-    asyncio.run(WorkerBridge(args.profile, args.session_root).run())
+    bridge = WorkerBridge(
+        args.profile,
+        args.session_root,
+        disabled_tools=tuple(args.disable_tool),
+        resume_session_id=args.resume_session,
+        auto_approve=args.auto_approve,
+    )
+    asyncio.run(bridge.run())
 
 
 if __name__ == "__main__":

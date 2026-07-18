@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 from copy import deepcopy
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -30,6 +32,7 @@ from vibe.core.agents.models import BuiltinAgentName, ManagedAgentState
 from vibe.core.config import VibeConfig, resolve_api_key
 from vibe.core.config.harness_files import init_harness_files_manager
 from vibe.core.config.orchestrator_legacy import LegacyConfigOrchestrator
+from vibe.core.tools.manager import ToolManager
 from vibe.core.utils.platform import is_windows
 from vibe.core.worktree import PreparedWorktree, WorktreeError, prepare_worktree_session
 
@@ -37,16 +40,19 @@ WORKER_PATH = Path(__file__).with_name("worker.py")
 DEFAULT_GROUP = "unassigned"
 ORCHESTRATOR_ID = "orchestrator"
 COATS = ("orange", "mint", "rose", "blue", "violet", "charcoal", "sunny")
-TERMINAL_STATES = {"completed", "cancelled"}
+TERMINAL_STATES = {"completed", "cancelled", "stopped"}
 LIVE_STATES = {"requested", "running", "working", "attention", "idle", "failed"}
 MIN_JSON_BODY_BYTES = 2
-MAX_JSON_BODY_BYTES = 64_000
+MAX_JSON_BODY_BYTES = 24_000_000
 MAX_STORED_RUNS = 100
 MAX_ACTIVE_AGENTS = 8
 MAX_QUEUED_MESSAGES = 20
 MAX_MESSAGE_CHARS = 8_000
 MAX_CONVERSATION_ITEMS = 250
 MAX_EVENTS = 180
+MAX_ROOM_IMAGES = 4
+MAX_ROOM_IMAGE_BYTES = 4 * 1024 * 1024
+ALLOWED_IMAGE_TYPES = {"image/gif", "image/jpeg", "image/png", "image/webp"}
 LOOPBACK_HOST = "127.0.0.1"
 ALLOWED_STATIC_PATHS = {
     "/web/agent-room/",
@@ -79,6 +85,9 @@ class AgentWorker:
         worktree: PreparedWorktree,
         session_root: Path,
         worker_environment: dict[str, str],
+        disabled_tools: tuple[str, ...] = (),
+        resume_session_id: str | None = None,
+        force_auto_approve: bool = False,
     ) -> None:
         self.store = store
         self.run_id = run_id
@@ -86,6 +95,9 @@ class AgentWorker:
         self.worktree = worktree
         self.session_root = session_root
         self.worker_environment = worker_environment
+        self.disabled_tools = disabled_tools
+        self.resume_session_id = resume_session_id
+        self.force_auto_approve = force_auto_approve
         self.ready = Event()
         self.write_lock = RLock()
         self.process: subprocess.Popen[str] | None = None
@@ -99,6 +111,12 @@ class AgentWorker:
             "--session-root",
             str(self.session_root),
         ]
+        for tool_name in self.disabled_tools:
+            command.extend(("--disable-tool", tool_name))
+        if self.resume_session_id:
+            command.extend(("--resume-session", self.resume_session_id))
+        if self.force_auto_approve:
+            command.append("--auto-approve")
         self.process = subprocess.Popen(
             command,
             cwd=self.worktree.path,
@@ -169,13 +187,14 @@ class AgentWorker:
             return
         return_code = process.wait()
         self.ready.set()
-        self.store.observe_worker_exit(self.run_id, return_code)
+        self.store.observe_worker_exit(self, return_code)
 
 
 class AgentRoomStore:
     def __init__(self, workdir: Path, *, network_mode: str = "auto") -> None:
         self._workdir = workdir
         self._lock = RLock()
+        self._lifecycle_locks: dict[str, RLock] = {}
         self._workers: dict[str, AgentWorker] = {}
         vibe_home = Path(os.environ.get("VIBE_HOME", "~/.vibe")).expanduser()
         self._session_root = vibe_home / "logs" / "session"
@@ -183,6 +202,7 @@ class AgentRoomStore:
         self._runs = self._load_registry()
         self._worker_environment, self._network = resolve_worker_network(network_mode)
         self._profiles = self._load_profiles()
+        self._tools = self._load_tools()
         self._integration_branch = git_output(
             self._workdir, "branch", "--show-current"
         ).strip()
@@ -197,12 +217,16 @@ class AgentRoomStore:
                 "connected": True,
                 "activities": [self._public_run(run) for run in self._runs.values()],
                 "profiles": deepcopy(self._profiles),
+                "tools": deepcopy(self._tools),
                 "coordination": self._coordination_locked(),
                 "network": deepcopy(self._network),
             }
 
     def create(self, payload: dict[str, Any]) -> dict[str, Any]:
-        profile = self.required_text(payload, "agent_name", 80)
+        profile = (
+            self._optional_text(payload, "agent_name", 80)
+            or BuiltinAgentName.AUTO_APPROVE
+        )
         if profile == BuiltinAgentName.ORCHESTRATOR:
             raise ValueError("The room already has one orchestrator")
         if profile not in {item["name"] for item in self._profiles}:
@@ -210,6 +234,8 @@ class AgentRoomStore:
         task = self.required_text(payload, "task", MAX_MESSAGE_CHARS)
         display_name = self._optional_text(payload, "display_name", 50) or profile
         group_id = self._optional_text(payload, "group_id", 80) or DEFAULT_GROUP
+        enabled_tools = self._enabled_tools(payload)
+        auto_approve = self._optional_bool(payload, "auto_approve", default=True)
         client_message_id = (
             self._optional_text(payload, "client_message_id", 100)
             or f"create-{uuid4().hex}"
@@ -221,6 +247,8 @@ class AgentRoomStore:
             task=task,
             is_orchestrator=False,
             client_message_id=client_message_id,
+            enabled_tools=enabled_tools,
+            auto_approve=auto_approve,
         )
         return self._public_run(run)
 
@@ -232,18 +260,32 @@ class AgentRoomStore:
             self._optional_text(payload, "client_message_id", 100)
             or f"web-{uuid4().hex}"
         )
+        images = self._validated_images(payload)
         if interpret_commands and content.startswith("//"):
             content = content[1:]
         elif interpret_commands and content.startswith("/"):
             return self._chat_command(run_id, content, client_message_id)
+        with self._lifecycle_lock(run_id):
+            return self._send_prompt_message(run_id, content, client_message_id, images)
+
+    def _send_prompt_message(
+        self,
+        run_id: str,
+        content: str,
+        client_message_id: str,
+        images: list[dict[str, Any]],
+    ) -> dict[str, Any]:
         with self._lock:
             run = self._get_run_locked(run_id)
             existing = self._find_client_message(run, client_message_id)
             if existing is not None:
                 return {"message": deepcopy(existing), "run": self._public_run(run)}
-            worker = self._workers.get(run_id)
-            if worker is None or not run.get("runtime_live"):
-                raise ValueError("This agent is no longer running")
+        worker = self._ensure_worker(run_id)
+        with self._lock:
+            run = self._get_run_locked(run_id)
+            existing = self._find_client_message(run, client_message_id)
+            if existing is not None:
+                return {"message": deepcopy(existing), "run": self._public_run(run)}
             queued = sum(
                 item.get("status") in {"queued", "running"}
                 for item in run.get("conversation", [])
@@ -254,24 +296,28 @@ class AgentRoomStore:
                     f"This agent already has {MAX_QUEUED_MESSAGES} queued messages"
                 )
             message = self._message("user", content, client_message_id, "queued")
+            message["attachments"] = [
+                {"alias": image["alias"], "mime_type": image["mime_type"]}
+                for image in images
+            ]
             run["conversation"].append(message)
             run["queued_messages"] = int(run.get("queued_messages") or 0) + 1
             run["updated_at"] = time.time()
             self._trim_conversation(run)
-            self._persist_locked()
-        try:
-            worker.send({
-                "type": "prompt",
-                "message_id": message["id"],
-                "content": content,
-            })
-        except Exception as error:
-            with self._lock:
+            try:
+                worker.send({
+                    "type": "prompt",
+                    "message_id": message["id"],
+                    "content": content,
+                    "images": images,
+                })
+            except Exception as error:
                 message["status"] = "failed"
                 message["error_code"] = "worker_offline"
                 run["error"] = safe_error(error)
                 self._persist_locked()
-            raise
+                raise
+            self._persist_locked()
         self._broadcast_management_snapshot()
         return {"message": deepcopy(message), "run": self._public_run(run)}
 
@@ -288,16 +334,21 @@ class AgentRoomStore:
             return self._public_run(run)
 
     def stop(self, run_id: str) -> dict[str, Any]:
+        with self._lifecycle_lock(run_id):
+            return self._stop_worker(run_id)
+
+    def _stop_worker(self, run_id: str) -> dict[str, Any]:
         with self._lock:
             run = self._get_run_locked(run_id)
             worker = self._workers.pop(run_id, None)
             run["runtime_live"] = False
-            run["resumable"] = False
-            run["state"] = "cancelled"
+            run["resumable"] = True
+            run["state"] = "stopped"
             run["current_activity"] = "Agent stopped"
             for message in run.get("conversation", []):
                 if message.get("status") in {"queued", "running"}:
                     message["status"] = "cancelled"
+            self._expire_interactions(run)
             self._append_event(run, "stopped", "Agent stopped")
             self._persist_locked()
         if worker is not None:
@@ -429,9 +480,12 @@ class AgentRoomStore:
             self._persist_locked()
             return self._public_run(run)
 
-    def observe_worker_event(  # noqa: PLR0915
+    def observe_worker_event(  # noqa: PLR0912, PLR0915
         self, worker: AgentWorker, payload: dict[str, Any]
     ) -> None:
+        with self._lock:
+            if self._workers.get(worker.run_id) is not worker:
+                return
         event_type = payload.get("type")
         if event_type == "remote_request":
             Thread(
@@ -449,7 +503,7 @@ class AgentRoomStore:
             if event_type == "ready":
                 run.update({
                     "child_session_id": payload.get("session_id"),
-                    "parent_session_id": payload.get("session_id"),
+                    "parent_session_id": payload.get("parent_session_id"),
                     "model": payload.get("model"),
                     "context_limit": payload.get("context_limit"),
                     "state": "idle",
@@ -458,7 +512,19 @@ class AgentRoomStore:
                     "resumable": True,
                     "updated_at": now,
                 })
-                self._append_event(run, "ready", "Worker connected")
+                resume_requested = bool(payload.get("resume_requested"))
+                resumed = bool(payload.get("resumed"))
+                if resumed:
+                    self._append_event(run, "resumed", "Conversation resumed")
+                else:
+                    self._append_event(
+                        run,
+                        "ready",
+                        "Worker connected",
+                        str(payload.get("resume_error") or "")
+                        if resume_requested
+                        else None,
+                    )
                 worker.ready.set()
             elif event_type == "state":
                 self._observe_state_locked(run, payload)
@@ -524,6 +590,9 @@ class AgentRoomStore:
                     "context_limit": payload.get("context_limit"),
                     "estimated_cost_usd": payload.get("estimated_cost_usd", 0.0),
                     "model": payload.get("model"),
+                    "child_session_id": payload.get("session_id")
+                    or run.get("child_session_id"),
+                    "parent_session_id": payload.get("parent_session_id"),
                 })
             elif event_type == "prompt_failed":
                 message = self._message_by_id(run, payload.get("message_id"))
@@ -548,14 +617,20 @@ class AgentRoomStore:
             logs.append(line[:1_000])
             run["worker_logs"] = logs[-30:]
 
-    def observe_worker_exit(self, run_id: str, return_code: int) -> None:
+    def observe_worker_exit(self, worker: AgentWorker, return_code: int) -> None:
+        run_id = worker.run_id
         with self._lock:
             run = self._runs.get(run_id)
-            if run is None or not run.get("runtime_live"):
+            if (
+                run is None
+                or not run.get("runtime_live")
+                or self._workers.get(run_id) is not worker
+            ):
                 return
+            self._workers.pop(run_id, None)
             run["runtime_live"] = False
-            run["resumable"] = False
-            run["state"] = "failed" if return_code else "cancelled"
+            run["resumable"] = True
+            run["state"] = "failed" if return_code else "stopped"
             run["current_activity"] = (
                 f"Worker exited with status {return_code}"
                 if return_code
@@ -565,6 +640,7 @@ class AgentRoomStore:
             for message in run.get("conversation", []):
                 if message.get("status") in {"queued", "running"}:
                     message["status"] = "failed" if return_code else "cancelled"
+            self._expire_interactions(run)
             self._append_event(run, "worker_exit", run["current_activity"])
             self._persist_locked()
         self._broadcast_management_snapshot()
@@ -577,15 +653,34 @@ class AgentRoomStore:
             worker.stop()
 
     def _launch_orchestrator(self) -> None:
-        self._launch_worker(
-            profile=BuiltinAgentName.ORCHESTRATOR,
-            display_name="Orchestrator",
-            group_id="coordination",
-            task="Coordinate and control the room's isolated agents",
-            is_orchestrator=True,
-            client_message_id=None,
-            fixed_run_id=ORCHESTRATOR_ID,
-        )
+        with self._lock:
+            existing = self._runs.get(ORCHESTRATOR_ID)
+            if existing is not None:
+                existing["auto_approve"] = True
+                existing.setdefault(
+                    "enabled_tools", [item["name"] for item in self._tools]
+                )
+        if existing is not None:
+            self._ensure_worker(ORCHESTRATOR_ID)
+        else:
+            self._launch_worker(
+                profile=BuiltinAgentName.ORCHESTRATOR,
+                display_name="Orchestrator",
+                group_id="coordination",
+                task="Coordinate and control the room's isolated agents",
+                is_orchestrator=True,
+                client_message_id=None,
+                fixed_run_id=ORCHESTRATOR_ID,
+            )
+        with self._lock:
+            run = self._runs[ORCHESTRATOR_ID]
+            self._append_event(
+                run,
+                "network",
+                f"Mistral {self._network['selected_mode']} connection ready",
+                "Authenticated" if self._network["authenticated"] else "Unavailable",
+            )
+            self._persist_locked()
 
     def _launch_worker(
         self,
@@ -597,6 +692,8 @@ class AgentRoomStore:
         is_orchestrator: bool,
         client_message_id: str | None,
         fixed_run_id: str | None = None,
+        enabled_tools: list[str] | None = None,
+        auto_approve: bool = False,
     ) -> dict[str, Any]:
         with self._lock:
             active_count = sum(run.get("runtime_live") for run in self._runs.values())
@@ -646,6 +743,10 @@ class AgentRoomStore:
             "error": None,
             "resumable": True,
             "queued_messages": len(conversation),
+            "enabled_tools": enabled_tools
+            if enabled_tools is not None
+            else [item["name"] for item in self._tools],
+            "auto_approve": auto_approve or is_orchestrator,
             "worktree_name": prepared.name,
             "worktree_path": str(prepared.path),
             "worktree_root": str(prepared.root),
@@ -664,6 +765,8 @@ class AgentRoomStore:
             prepared,
             self._session_root,
             self._worker_environment,
+            disabled_tools=self._disabled_tools(enabled_tools),
+            force_auto_approve=auto_approve or is_orchestrator,
         )
         with self._lock:
             if fixed_run_id is not None:
@@ -696,6 +799,95 @@ class AgentRoomStore:
             raise
         self._broadcast_management_snapshot()
         return run
+
+    def _ensure_worker(self, run_id: str) -> AgentWorker:
+        leader = False
+        with self._lock:
+            run = self._get_run_locked(run_id)
+            worker = self._workers.get(run_id)
+            if worker is not None and run.get("runtime_live") and worker.ready.is_set():
+                return worker
+            if worker is None or not run.get("runtime_live"):
+                active_count = sum(
+                    item.get("runtime_live") for item in self._runs.values()
+                )
+                if active_count >= MAX_ACTIVE_AGENTS:
+                    raise ValueError(
+                        f"At most {MAX_ACTIVE_AGENTS} agents can be active"
+                    )
+                worktree_name = str(run.get("worktree_name") or "")
+                if not worktree_name or run.get("merge_status") == "merged":
+                    worktree_name = self._worktree_name(run["agent_display_name"])
+                try:
+                    prepared = prepare_worktree_session(worktree_name, self._workdir)
+                except WorktreeError as error:
+                    raise ValueError(str(error)) from error
+                if prepared.name != run.get("worktree_name"):
+                    run.update({
+                        "worktree_name": prepared.name,
+                        "worktree_path": str(prepared.path),
+                        "worktree_root": str(prepared.root),
+                        "branch": prepared.branch,
+                        "base_commit": prepared.base_commit,
+                        "merge_status": "not_ready",
+                        "merge_error": None,
+                    })
+                enabled_tools = run.get("enabled_tools")
+                if not isinstance(enabled_tools, list):
+                    enabled_tools = [item["name"] for item in self._tools]
+                    run["enabled_tools"] = enabled_tools
+                worker = AgentWorker(
+                    self,
+                    run_id,
+                    run["agent_name"],
+                    prepared,
+                    self._session_root,
+                    self._worker_environment,
+                    disabled_tools=self._disabled_tools(enabled_tools),
+                    resume_session_id=run.get("child_session_id"),
+                    force_auto_approve=bool(
+                        run.get("auto_approve") or run.get("is_orchestrator")
+                    ),
+                )
+                self._workers[run_id] = worker
+                run.update({
+                    "runtime_live": True,
+                    "resumable": True,
+                    "state": "requested",
+                    "current_activity": "Restarting in isolated worktree",
+                    "error": None,
+                    "updated_at": time.time(),
+                })
+                self._append_event(run, "restart", "Restarting retained conversation")
+                self._persist_locked()
+                leader = True
+        try:
+            if leader:
+                worker.start()
+            if not worker.ready.wait(timeout=25):
+                raise RuntimeError("Agent worker did not become ready")
+            if worker.process is None or worker.process.poll() is not None:
+                raise RuntimeError("Agent worker failed to restart")
+            return worker
+        except Exception as error:
+            worker.stop()
+            with self._lock:
+                if self._workers.get(run_id) is worker:
+                    self._workers.pop(run_id, None)
+                run = self._get_run_locked(run_id)
+                run.update({
+                    "runtime_live": False,
+                    "resumable": True,
+                    "state": "failed",
+                    "current_activity": "Restart failed",
+                    "error": safe_error(error),
+                    "updated_at": time.time(),
+                })
+                self._append_event(
+                    run, "restart_failed", "Restart failed", run["error"]
+                )
+                self._persist_locked()
+            raise ValueError(safe_error(error)) from error
 
     def _observe_state_locked(
         self, run: dict[str, Any], payload: dict[str, Any]
@@ -1053,6 +1245,72 @@ class AgentRoomStore:
             })
         return profiles
 
+    @staticmethod
+    def _load_tools() -> list[dict[str, str]]:
+        config = VibeConfig.load()
+        manager = ToolManager(lambda: config, defer_mcp=True)
+        return [
+            {"name": name, "display_name": name.replace("_", " ").title()}
+            for name in sorted(manager.available_tools)
+            if name != "exit_plan_mode"
+        ]
+
+    def _enabled_tools(self, payload: dict[str, Any]) -> list[str]:
+        available = {item["name"] for item in self._tools}
+        raw = payload.get("enabled_tools")
+        if raw is None:
+            return sorted(available)
+        if not isinstance(raw, list) or any(not isinstance(item, str) for item in raw):
+            raise ValueError("enabled_tools must be a list of tool names")
+        enabled = list(dict.fromkeys(item.strip() for item in raw if item.strip()))
+        unknown = sorted(set(enabled) - available)
+        if unknown:
+            raise ValueError(f"Unknown tools: {', '.join(unknown)}")
+        return enabled
+
+    @staticmethod
+    def _validated_images(payload: dict[str, Any]) -> list[dict[str, Any]]:
+        raw = payload.get("images")
+        if raw is None:
+            return []
+        if not isinstance(raw, list) or len(raw) > MAX_ROOM_IMAGES:
+            raise ValueError(f"images must contain at most {MAX_ROOM_IMAGES} items")
+        images = []
+        for item in raw:
+            if not isinstance(item, dict):
+                raise ValueError("Each image must be an object")
+            alias = item.get("alias")
+            mime_type = item.get("mime_type")
+            data = item.get("data")
+            if not isinstance(alias, str) or not alias.strip():
+                raise ValueError("Each image requires a name")
+            if mime_type not in ALLOWED_IMAGE_TYPES:
+                raise ValueError("Unsupported image type")
+            if not isinstance(data, str):
+                raise ValueError("Each image requires base64 data")
+            try:
+                decoded = base64.b64decode(data, validate=True)
+            except (binascii.Error, ValueError) as error:
+                raise ValueError("Image data is not valid base64") from error
+            if len(decoded) > MAX_ROOM_IMAGE_BYTES:
+                raise ValueError(
+                    f"Each image must be at most {MAX_ROOM_IMAGE_BYTES // 1024 // 1024} MB"
+                )
+            images.append({
+                "source": {"kind": "inline", "data": data},
+                "alias": alias.strip()[:120],
+                "mime_type": mime_type,
+            })
+        return images
+
+    def _disabled_tools(self, enabled_tools: list[str] | None) -> tuple[str, ...]:
+        if enabled_tools is None:
+            return ()
+        enabled = set(enabled_tools)
+        return tuple(
+            item["name"] for item in self._tools if item["name"] not in enabled
+        )
+
     def _coordination_locked(self) -> dict[str, Any]:
         live = [run for run in self._runs.values() if run.get("runtime_live")]
         context_tokens = sum(int(run.get("context_tokens") or 0) for run in live)
@@ -1081,7 +1339,7 @@ class AgentRoomStore:
         with self._lock:
             for run in self._runs.values():
                 run["runtime_live"] = False
-                run["resumable"] = False
+                run["resumable"] = True
                 for approval in run.get("approvals", []):
                     if approval.get("status") == "pending":
                         approval["status"] = "expired"
@@ -1089,7 +1347,7 @@ class AgentRoomStore:
                     if question.get("status") == "pending":
                         question["status"] = "expired"
                 if run.get("state") in LIVE_STATES:
-                    run["state"] = "cancelled"
+                    run["state"] = "stopped"
                     run["current_activity"] = "Interrupted when Agent Room stopped"
                     for message in run.get("conversation", []):
                         if message.get("status") in {"queued", "running"}:
@@ -1114,6 +1372,7 @@ class AgentRoomStore:
             item.setdefault("questions", [])
             item.setdefault("conversation", [])
             item.setdefault("events", [])
+            item.setdefault("resumable", True)
             runs[item["tool_call_id"]] = item
         return runs
 
@@ -1151,6 +1410,7 @@ class AgentRoomStore:
             "failed": ManagedAgentState.FAILED,
             "completed": ManagedAgentState.STOPPED,
             "cancelled": ManagedAgentState.STOPPED,
+            "stopped": ManagedAgentState.STOPPED,
         }.get(run.get("state"), ManagedAgentState.FAILED)
         usage = run.get("usage") or {}
         return {
@@ -1226,6 +1486,15 @@ class AgentRoomStore:
         run["conversation"] = run["conversation"][-MAX_CONVERSATION_ITEMS:]
 
     @staticmethod
+    def _expire_interactions(run: dict[str, Any]) -> None:
+        for approval in run.get("approvals", []):
+            if approval.get("status") == "pending":
+                approval["status"] = "expired"
+        for question in run.get("questions", []):
+            if question.get("status") == "pending":
+                question["status"] = "expired"
+
+    @staticmethod
     def _append_event(
         run: dict[str, Any], kind: str, label: str, detail: str | None = None
     ) -> None:
@@ -1257,6 +1526,10 @@ class AgentRoomStore:
         except KeyError as error:
             raise KeyError(run_id) from error
 
+    def _lifecycle_lock(self, run_id: str) -> RLock:
+        with self._lock:
+            return self._lifecycle_locks.setdefault(run_id, RLock())
+
     @staticmethod
     def required_text(payload: dict[str, Any], name: str, limit: int) -> str:
         value = payload.get(name)
@@ -1272,6 +1545,13 @@ class AgentRoomStore:
         if not isinstance(value, str):
             raise ValueError(f"{name} must be a string")
         return value.strip()[:limit] or None
+
+    @staticmethod
+    def _optional_bool(payload: dict[str, Any], name: str, *, default: bool) -> bool:
+        value = payload.get(name, default)
+        if not isinstance(value, bool):
+            raise ValueError(f"{name} must be a boolean")
+        return value
 
 
 class suppress_errors:
@@ -1350,22 +1630,11 @@ def probe_mistral_transport(
     headers = {"Authorization": f"Bearer {credential}"} if credential else None
     try:
         response = httpx.get(
-            NETWORK_PROBE_URL,
-            headers=headers,
-            timeout=10,
-            trust_env=trust_env,
+            NETWORK_PROBE_URL, headers=headers, timeout=10, trust_env=trust_env
         )
-        return {
-            "reachable": True,
-            "status": response.status_code,
-            "error": None,
-        }
+        return {"reachable": True, "status": response.status_code, "error": None}
     except httpx.HTTPError as error:
-        return {
-            "reachable": False,
-            "status": None,
-            "error": safe_error(error),
-        }
+        return {"reachable": False, "status": None, "error": safe_error(error)}
 
 
 def terminate_process_tree(process: subprocess.Popen[str]) -> None:

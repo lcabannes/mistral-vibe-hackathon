@@ -238,6 +238,22 @@
           </label>
         </div>
 
+        <fieldset class="agent-capabilities">
+          <legend>Capabilities</legend>
+          <label class="capability-toggle">
+            <input id="agent-auto-approve" type="checkbox" checked />
+            <span>Auto-approve tool calls</span>
+          </label>
+          <div class="tool-picker-heading">
+            <strong>Tools</strong>
+            <label>
+              <input id="agent-tools-all" type="checkbox" checked />
+              <span>Select all</span>
+            </label>
+          </div>
+          <div class="agent-tool-list" id="agent-tool-list"></div>
+        </fieldset>
+
         <label>
           First task
           <textarea

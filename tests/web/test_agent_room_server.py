@@ -58,6 +58,8 @@ def make_run(run_id: str = "worker-1") -> dict[str, Any]:
         "questions": [],
         "error": None,
         "resumable": True,
+        "enabled_tools": ["bash", "web_search"],
+        "auto_approve": True,
         "queued_messages": 0,
         "worktree_path": "/tmp/worker",
         "worktree_root": "/tmp/worker",
@@ -76,18 +78,29 @@ def store(tmp_path: Path) -> Any:
     instance = object.__new__(room.AgentRoomStore)
     instance._workdir = tmp_path
     instance._lock = room.RLock()
+    instance._lifecycle_locks = {}
     instance._workers = {}
     instance._session_root = tmp_path / "sessions"
     instance._registry_path = tmp_path / "runs.json"
     instance._worker_environment = {"PYTHONUNBUFFERED": "1"}
     instance._network = {}
+    instance._tools = [
+        {"name": "bash", "display_name": "Bash"},
+        {"name": "web_search", "display_name": "Web Search"},
+    ]
     instance._profiles = [
         {
             "name": "default",
             "display_name": "Default",
             "description": "Default profile",
             "safety": "neutral",
-        }
+        },
+        {
+            "name": "auto-approve",
+            "display_name": "Auto Approve",
+            "description": "Auto approve",
+            "safety": "yolo",
+        },
     ]
     instance._runs = {}
     return instance
@@ -178,6 +191,127 @@ def test_message_acceptance_is_idempotent_and_fifo(store: Any) -> None:
     assert first["message"]["id"] != second["message"]["id"]
 
 
+def test_message_validates_and_forwards_image_input(store: Any) -> None:
+    run = make_run()
+    worker = FakeWorker(run["tool_call_id"])
+    store._runs[run["tool_call_id"]] = run
+    store._workers[run["tool_call_id"]] = worker
+
+    result = store.send_message(
+        run["tool_call_id"],
+        {
+            "content": "Inspect this",
+            "client_message_id": "image-1",
+            "images": [
+                {"alias": "pixel.png", "mime_type": "image/png", "data": "iVBORw0KGgo="}
+            ],
+        },
+    )
+
+    assert result["message"]["attachments"] == [
+        {"alias": "pixel.png", "mime_type": "image/png"}
+    ]
+    assert worker.sent[-1]["images"][0]["source"]["kind"] == "inline"
+    with pytest.raises(ValueError, match="valid base64"):
+        store.send_message(
+            run["tool_call_id"],
+            {
+                "content": "Bad image",
+                "images": [
+                    {
+                        "alias": "bad.png",
+                        "mime_type": "image/png",
+                        "data": "not-base64!",
+                    }
+                ],
+            },
+        )
+
+
+def test_message_restarts_a_stopped_agent_in_place(
+    monkeypatch: pytest.MonkeyPatch, store: Any, tmp_path: Path
+) -> None:
+    prepared = PreparedWorktree(
+        name="room-worker-existing",
+        branch="room-worker-existing",
+        root=tmp_path / "worktree",
+        path=tmp_path / "worktree",
+        repo_root=tmp_path,
+        base_commit="deadbeef",
+        created=False,
+        branch_created=False,
+    )
+    prepared.path.mkdir()
+    run = make_run()
+    run.update({
+        "runtime_live": False,
+        "state": "stopped",
+        "worktree_name": prepared.name,
+        "worktree_path": str(prepared.path),
+        "worktree_root": str(prepared.root),
+        "branch": prepared.branch,
+        "base_commit": prepared.base_commit,
+    })
+    run["conversation"].append(
+        store._message("assistant", "Earlier answer", None, "succeeded")
+    )
+    store._runs[run["tool_call_id"]] = run
+    launches: list[Any] = []
+
+    class RelaunchedWorker(FakeWorker):
+        def __init__(
+            self, _store: Any, run_id: str, *_args: Any, **kwargs: Any
+        ) -> None:
+            super().__init__(run_id)
+            self.ready.clear()
+            self.process = type("Process", (), {"poll": lambda self: None})()
+            launches.append(kwargs)
+
+        def start(self) -> None:
+            self.ready.set()
+
+    monkeypatch.setattr(room, "prepare_worktree_session", lambda *_args: prepared)
+    monkeypatch.setattr(room, "AgentWorker", RelaunchedWorker)
+
+    result = store.send_message(
+        run["tool_call_id"],
+        {"content": "Continue", "client_message_id": "resume-message"},
+    )
+
+    assert result["run"]["tool_call_id"] == run["tool_call_id"]
+    assert result["run"]["worktree_path"] == str(prepared.path)
+    assert [item["content"] for item in run["conversation"]] == [
+        "Earlier answer",
+        "Continue",
+    ]
+    assert run["runtime_live"] is True
+    assert launches[0]["resume_session_id"] == "child"
+    assert launches[0]["force_auto_approve"] is True
+    assert store._workers[run["tool_call_id"]].sent[-1]["content"] == "Continue"
+
+
+def test_create_defaults_to_yolo_and_accepts_zero_tools(store: Any) -> None:
+    captured: dict[str, Any] = {}
+
+    def launch(**kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return make_run()
+
+    store._launch_worker = launch
+
+    store.create({"task": "Work", "enabled_tools": []})
+
+    assert captured["profile"] == "auto-approve"
+    assert captured["enabled_tools"] == []
+    assert captured["auto_approve"] is True
+    assert store._disabled_tools([]) == ("bash", "web_search")
+
+
+def test_create_rejects_unknown_tools(store: Any) -> None:
+    with pytest.raises(ValueError, match="Unknown tools: shell_everything"):
+        store.create({"task": "Work", "enabled_tools": ["shell_everything"]})
+
+
 def test_slash_command_is_typed_and_never_forwarded(store: Any) -> None:
     run = make_run()
     worker = FakeWorker(run["tool_call_id"])
@@ -256,17 +390,35 @@ def test_worker_events_update_message_usage_and_memory(store: Any) -> None:
 def test_stop_keeps_the_worktree_and_history(store: Any) -> None:
     run = make_run()
     run["conversation"].append(store._message("user", "work", "client", "running"))
+    run["approvals"].append({"id": "old-approval", "status": "pending"})
+    run["questions"].append({"id": "old-question", "status": "pending"})
     worker = FakeWorker(run["tool_call_id"])
     store._runs[run["tool_call_id"]] = run
     store._workers[run["tool_call_id"]] = worker
 
     stopped = store.stop(run["tool_call_id"])
 
-    assert stopped["state"] == "cancelled"
+    assert stopped["state"] == "stopped"
     assert stopped["runtime_live"] is False
+    assert stopped["resumable"] is True
     assert stopped["worktree_path"] == "/tmp/worker"
     assert stopped["conversation"][0]["status"] == "cancelled"
+    assert stopped["approvals"][0]["status"] == "expired"
+    assert stopped["questions"][0]["status"] == "expired"
     assert worker.stopped is True
+
+
+def test_stale_worker_exit_cannot_stop_a_replacement(store: Any) -> None:
+    run = make_run()
+    old_worker = FakeWorker(run["tool_call_id"])
+    replacement = FakeWorker(run["tool_call_id"])
+    store._runs[run["tool_call_id"]] = run
+    store._workers[run["tool_call_id"]] = replacement
+
+    store.observe_worker_exit(old_worker, 1)
+
+    assert run["runtime_live"] is True
+    assert store._workers[run["tool_call_id"]] is replacement
 
 
 def test_launch_records_a_distinct_worktree(
@@ -285,7 +437,9 @@ def test_launch_records_a_distinct_worktree(
     prepared.path.mkdir()
 
     class LaunchWorker(FakeWorker):
-        def __init__(self, _store: Any, run_id: str, *_args: Any) -> None:
+        def __init__(
+            self, _store: Any, run_id: str, *_args: Any, **_kwargs: Any
+        ) -> None:
             super().__init__(run_id)
             self.process = type("Process", (), {"poll": lambda self: None})()
 
