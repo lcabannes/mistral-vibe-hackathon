@@ -399,7 +399,7 @@ function updateTeamPresentation() {
   if (elements.sidebarAddGroup) elements.sidebarAddGroup.hidden = isTeam;
   if (elements.toolbarAddGroupButton) elements.toolbarAddGroupButton.hidden = isTeam;
   if (elements.roomTitle) {
-    elements.roomTitle.textContent = isTeam ? "Team agent rooms" : "The agent room";
+    elements.roomTitle.textContent = isTeam ? "Team Vibe Rooms" : "The Vibe Room";
   }
   const localRoom = state.groups.find((room) => room.isLocal);
   if (localRoom && elements.localWorkspaceName) {
@@ -1061,7 +1061,7 @@ function renderStatusView(agent, stateMeta) {
     notice.textContent =
       agent.source === "team"
         ? "This coworker's cat is synchronized and read-only. Shared history follows the team's privacy setting."
-        : "This cat is demo data. Start the Agent Room runner to launch and control real Vibe sessions.";
+        : "This cat is demo data. Start the Vibe Room runner to launch and control real Vibe sessions.";
     groupSection.append(notice);
   }
 
@@ -1182,7 +1182,7 @@ function renderChatView(agent) {
   } else {
     const notice = document.createElement("p");
     notice.className = "bridge-notice";
-    notice.textContent = "Demo transcript · connect the Agent Room to chat.";
+    notice.textContent = "Demo transcript · connect the Vibe Room to chat.";
     section.append(notice);
   }
   return section;

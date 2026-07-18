@@ -917,7 +917,7 @@ class HomePage(ResponsiveWorkspacePage):
             yield Static(self._summary_text(), id="office-summary")
             room_url = self._view.server_url or ""
             link = Link(
-                "Open Agent Room in Browser",
+                "Open Vibe Room in Browser",
                 url=room_url,
                 tooltip=room_url or None,
                 id="office-room-link",
@@ -1002,12 +1002,7 @@ class HomePage(ResponsiveWorkspacePage):
             command.focus()
             command.insert_text_at_cursor(event.character)
             return
-        direction = {
-            "up": -1,
-            "left": -1,
-            "down": 1,
-            "right": 1,
-        }.get(event.key)
+        direction = {"up": -1, "left": -1, "down": 1, "right": 1}.get(event.key)
         if direction is None:
             return
         event.stop()

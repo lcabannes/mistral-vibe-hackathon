@@ -218,7 +218,7 @@ def ensure_agent_room_backend(
         and not _stop_unresponsive_owner(discovery)
     ):
         raise AgentRoomUnavailable(
-            "The discovered Agent Room is unresponsive and could not be stopped"
+            "The discovered Vibe Room is unresponsive and could not be stopped"
         )
 
     target = f"http://127.0.0.1:{port}"
@@ -229,7 +229,7 @@ def ensure_agent_room_backend(
     )
     if process is None:
         raise AgentRoomUnavailable(
-            "Agent Room server is unavailable from this Vibe installation"
+            "Vibe Room server is unavailable from this Vibe installation"
         )
 
     deadline = time.monotonic() + startup_timeout
@@ -238,12 +238,11 @@ def ensure_agent_room_backend(
             return target
         if process.poll() is not None:
             raise AgentRoomUnavailable(
-                f"Agent Room exited during startup with status {process.returncode}"
+                f"Vibe Room exited during startup with status {process.returncode}"
             )
         time.sleep(0.1)
     raise AgentRoomUnavailable(
-        f"Agent Room did not become ready at {target} within "
-        f"{startup_timeout:g} seconds"
+        f"Vibe Room did not become ready at {target} within {startup_timeout:g} seconds"
     )
 
 
@@ -294,7 +293,7 @@ class AgentRoomClient:
             snapshot = AgentRoomSnapshot.model_validate_json(json.dumps(payload))
         except ValueError as error:
             raise AgentRoomUnavailable(
-                f"Invalid Agent Room snapshot: {error}"
+                f"Invalid Vibe Room snapshot: {error}"
             ) from error
         changed = (
             snapshot.connected != self._snapshot.connected
@@ -461,7 +460,7 @@ class AgentRoomClient:
                 run for run in self._snapshot.activities if run.tool_call_id == agent_id
             )
         except StopIteration as error:
-            raise ValueError(f"Unknown Agent Room run: {agent_id}") from error
+            raise ValueError(f"Unknown Vibe Room run: {agent_id}") from error
 
     async def _request(
         self, method: str, path: str, payload: dict[str, Any] | None = None

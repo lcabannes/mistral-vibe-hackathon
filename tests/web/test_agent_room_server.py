@@ -770,7 +770,7 @@ def test_orchestrator_commands_use_a_fixed_allowlist(store: Any) -> None:
     store._record_control_request({"action": "command", "command": "/cancel worker-1"})
 
     assert calls == ["worker-1"]
-    with pytest.raises(ValueError, match="Supported Agent Room commands"):
+    with pytest.raises(ValueError, match="Supported Vibe Room commands"):
         store._record_control_request({
             "action": "command",
             "command": "/shell worker-1",

@@ -1022,7 +1022,7 @@ class VibeApp(App):  # noqa: PLR0904
     ) -> OfficeViewModel:
         if self._agent_room_connected and self._agent_room_snapshot is not None:
             branch = self._agent_room_snapshot.workspace.get("integration_branch")
-            scope = f"Agent Room · {branch}" if branch else "Agent Room"
+            scope = f"Vibe Room · {branch}" if branch else "Vibe Room"
             client = self._agent_room_client
             web_url = (
                 f"{client.base_url}/web/agent-room/" if client is not None else None
@@ -1103,7 +1103,7 @@ class VibeApp(App):  # noqa: PLR0904
         try:
             snapshot = await client.refresh()
         except AgentRoomUnavailable as error:
-            logger.debug("Agent Room discovery endpoint unavailable: %s", error)
+            logger.debug("Vibe Room discovery endpoint unavailable: %s", error)
             return False
         self._on_agent_room_snapshot(snapshot)
         self.agent_loop.set_agent_management_port(client)
@@ -1477,9 +1477,7 @@ class VibeApp(App):  # noqa: PLR0904
                     snapshot, local_member_id=service.member_id, local_agent_links=links
                 )
             except AgentRoomUnavailable as error:
-                logger.debug(
-                    "Could not publish team workspace to Agent Room: %s", error
-                )
+                logger.debug("Could not publish team workspace to Vibe Room: %s", error)
                 return
 
     def _refresh_workspace_pages(self) -> None:
@@ -1600,7 +1598,7 @@ class VibeApp(App):  # noqa: PLR0904
     ) -> None:
         client = self._agent_room_client
         if client is None or not self._agent_room_connected:
-            self.notify("Agent Room is unavailable", severity="error")
+            self.notify("Vibe Room is unavailable", severity="error")
             return
         try:
             await client.message(message.agent_id, message.content)
@@ -1612,7 +1610,7 @@ class VibeApp(App):  # noqa: PLR0904
     ) -> None:
         client = self._agent_room_client
         if client is None or not self._agent_room_connected:
-            self.notify("Agent Room is unavailable", severity="error")
+            self.notify("Vibe Room is unavailable", severity="error")
             return
         try:
             created = await client.start(BuiltinAgentName.DEFAULT.value, message.task)
@@ -1635,7 +1633,7 @@ class VibeApp(App):  # noqa: PLR0904
     ) -> None:
         client = self._agent_room_client
         if client is None or not self._agent_room_connected:
-            self.notify("Agent Room is unavailable", severity="error")
+            self.notify("Vibe Room is unavailable", severity="error")
             return
         try:
             await client.stop(message.agent_id)
@@ -1647,7 +1645,7 @@ class VibeApp(App):  # noqa: PLR0904
     ) -> None:
         client = self._agent_room_client
         if client is None or not self._agent_room_connected:
-            self.notify("Agent Room is unavailable", severity="error")
+            self.notify("Vibe Room is unavailable", severity="error")
             return
         try:
             await client.cancel(message.agent_id)
@@ -1659,7 +1657,7 @@ class VibeApp(App):  # noqa: PLR0904
     ) -> None:
         client = self._agent_room_client
         if client is None or not self._agent_room_connected:
-            self.notify("Agent Room is unavailable", severity="error")
+            self.notify("Vibe Room is unavailable", severity="error")
             return
         try:
             await client.resolve_approval(
@@ -1673,7 +1671,7 @@ class VibeApp(App):  # noqa: PLR0904
     ) -> None:
         client = self._agent_room_client
         if client is None or not self._agent_room_connected:
-            self.notify("Agent Room is unavailable", severity="error")
+            self.notify("Vibe Room is unavailable", severity="error")
             return
         try:
             await client.answer_question(

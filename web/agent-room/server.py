@@ -1134,7 +1134,7 @@ class AgentRoomStore:
             self.merge(agent_id)
         else:
             raise ValueError(
-                "Supported Agent Room commands are /cancel, /stop, and /merge"
+                "Supported Vibe Room commands are /cancel, /stop, and /merge"
             )
 
     def _chat_command(
@@ -1299,7 +1299,7 @@ class AgentRoomStore:
                 "--no-ff",
                 branch,
                 "-m",
-                f"Merge Agent Room branch {branch}",
+                f"Merge Vibe Room branch {branch}",
             ],
             check=True,
             capture_output=True,
@@ -1515,7 +1515,7 @@ class AgentRoomStore:
                         question["status"] = "expired"
                 if run.get("state") in LIVE_STATES:
                     run["state"] = "stopped"
-                    run["current_activity"] = "Interrupted when Agent Room stopped"
+                    run["current_activity"] = "Interrupted when Vibe Room stopped"
                     for message in run.get("conversation", []):
                         if message.get("status") in {"queued", "running"}:
                             message["status"] = "cancelled"
@@ -1990,7 +1990,7 @@ class AgentRoomOwnerLock:
         except OSError as error:
             handle.close()
             raise RuntimeError(
-                "Another Agent Room backend already owns this VIBE_HOME"
+                "Another Vibe Room backend already owns this VIBE_HOME"
             ) from error
         self._handle = handle
 
@@ -2047,12 +2047,12 @@ def assert_endpoint_available(port: int) -> None:
             endpoint.bind((LOOPBACK_HOST, port))
     except OSError as error:
         raise RuntimeError(
-            f"Agent Room endpoint {LOOPBACK_HOST}:{port} is already in use"
+            f"Vibe Room endpoint {LOOPBACK_HOST}:{port} is already in use"
         ) from error
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Serve the Vibe Agent Room")
+    parser = argparse.ArgumentParser(description="Serve the Vibe Room")
     parser.add_argument("--port", type=int, default=4173)
     parser.add_argument("--workdir", type=Path, default=REPOSITORY_ROOT)
     parser.add_argument(
@@ -2091,7 +2091,7 @@ def main() -> None:
         raise
     write_discovery(store, args.port, workdir)
     instance_id = store.snapshot()["instance_id"]
-    print(f"Agent Room: http://{LOOPBACK_HOST}:{args.port}/web/agent-room/")
+    print(f"Vibe Room: http://{LOOPBACK_HOST}:{args.port}/web/agent-room/")
     print(f"Integration worktree: {workdir}")
     network = store.snapshot()["network"]
     print(

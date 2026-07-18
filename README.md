@@ -24,9 +24,9 @@ Mistral Vibe is a command-line coding assistant powered by Mistral's models. It 
 > [!WARNING]
 > Mistral Vibe works on Windows, but we officially support and target UNIX environments.
 
-## Hackathon Agent Room quick start
+## Hackathon Vibe Room quick start
 
-This fork adds the browser Agent Room and matching Textual **Home** and
+This fork adds the browser Vibe Room and matching Textual **Home** and
 **Coworker rooms** views.
 Both are clients of one local backend, so they show the same real agents,
 conversations, queues, approvals, questions, token usage, cost, worktrees, and
@@ -76,7 +76,7 @@ uv run --no-dev vibe --server
 
 `vibe --server` starts or reuses the backend in the background and then opens
 the interactive CLI. It does not open a web browser automatically. Press
-`Ctrl+1` for **Home** and select **Open Agent Room in Browser**, or click the
+`Ctrl+1` for **Home** and select **Open Vibe Room in Browser**, or click the
 local URL printed at startup, to open the webpage in your browser. The default
 URL is <http://127.0.0.1:4173/web/agent-room/>. `auto` is the recommended network
 mode: it keeps a working proxy and bypasses an inherited proxy that rejects
@@ -114,7 +114,7 @@ uv run --no-dev vibe --server
 Choose **Trust repository** when Vibe asks. The committed `.vibe/team.toml`
 then autojoins this clone to `origin` on the `vibe-team-demo` branch. Keep the
 CLI open. Press `Ctrl+5` to open **Coworker rooms**. From `Ctrl+1` **Home**,
-select **Open Agent Room**, or open
+select **Open Vibe Room**, or open
 <http://127.0.0.1:4173/web/agent-room/> directly.
 
 #### Laptop B: install and start
@@ -130,7 +130,7 @@ uv run --no-dev vibe --server
 ```
 
 Choose **Trust repository**, keep the CLI open, and open **Coworker rooms** and
-the local Agent Room URL as on Laptop A. Within the sync interval, both screens
+the local Vibe Room URL as on Laptop A. Within the sync interval, both screens
 should show one room for Laptop A and one room for Laptop B.
 
 If either clone shows **local only**, or that laptop previously ran
@@ -161,7 +161,7 @@ fresh clones then use the automatic path above.
 5. Change `Scout`'s state on Laptop A by sending a message or stopping it, then confirm the coarse synchronized state updates on Laptop B.
 
 The team branch contains bounded team records. Local approvals, worktree paths,
-session IDs, and merge controls are not copied into remote Agent Room controls.
+session IDs, and merge controls are not copied into remote Vibe Room controls.
 This demo opts into sanitized message history, but sanitization is not a reason
 to put credentials in prompts. Stop future sharing on either laptop with:
 
@@ -182,14 +182,14 @@ and status with the webpage, send another message, cancel or stop work, resolve
 approvals, or answer questions. Stopped and failed agents remain selectable;
 sending a message resumes the same session and worktree.
 
-Only one Agent Room backend may use a given `~/.vibe` directory. If startup
+Only one Vibe Room backend may use a given `~/.vibe` directory. If startup
 reports that port 4173 or the backend is already owned, use the already-running
 page at <http://127.0.0.1:4173/web/agent-room/> or stop that process first.
 
 ## Upstream CLI installation (without hackathon features)
 
 The commands below install Mistral's released CLI. Use the source installation
-above when you need Agent Room or the synchronized Home view.
+above when you need Vibe Room or the synchronized Home view.
 
 **Linux and macOS**
 
@@ -221,7 +221,7 @@ pip install mistral-vibe
 
 ## Table of Contents
 
-- [Hackathon Agent Room quick start](#hackathon-agent-room-quick-start)
+- [Hackathon Vibe Room quick start](#hackathon-vibe-room-quick-start)
 - [Features](#features)
   - [Built-in Agents](#built-in-agents)
   - [Subagents and Task Delegation](#subagents-and-task-delegation)

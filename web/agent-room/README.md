@@ -1,4 +1,4 @@
-# Vibe Agent Room
+# Vibe Room
 
 Local web control room for persistent Mistral Vibe agents and Git-synchronized
 coworker rooms.
@@ -9,7 +9,7 @@ uv run vibe --server --workdir /path/to/integration-worktree
 
 This starts or reuses the backend in the background and launches the synced
 Textual CLI in the same terminal. Press `Ctrl+1` for **Home**, then select
-**Open Agent Room** to open <http://127.0.0.1:4173/web/agent-room/>.
+**Open Vibe Room** to open <http://127.0.0.1:4173/web/agent-room/>.
 
 The Textual Agent Home and browser are clients of this one backend. They share
 run IDs, Vibe sessions, conversations, queues, interactions, metrics, groups,

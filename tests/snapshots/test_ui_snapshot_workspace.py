@@ -62,7 +62,7 @@ def _populated_home_view() -> OfficeViewModel:
         session_id="parent",
         activities=tuple(_activity(index, state) for index, state in enumerate(states)),
     )
-    return OfficeViewModel(snapshot, "Agent Room · main")
+    return OfficeViewModel(snapshot, "Vibe Room · main")
 
 
 def _populated_usage_view() -> UsageViewModel:

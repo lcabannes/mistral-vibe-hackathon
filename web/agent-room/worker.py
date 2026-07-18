@@ -117,7 +117,7 @@ class RemoteControlPort:
         await self._bridge.remote_request(
             "control", {"request": request.model_dump(mode="json")}
         )
-        return CLIControlResult(message="Queued in Agent Room")
+        return CLIControlResult(message="Queued in Vibe Room")
 
 
 class WorkerBridge:
@@ -191,7 +191,7 @@ class WorkerBridge:
             await agent_loop.set_tool_permission("control_cli", ToolPermission.ALWAYS)
             await agent_loop.inject_user_context(
                 """
-You are the Agent Room orchestrator. Every worker has its own Git worktree,
+You are the Vibe Room orchestrator. Every worker has its own Git worktree,
 branch, persistent process, chat, and approval channel. Delegate implementation
 with manage_agents; never ask two workers to edit the same files. Use
 control_cli command /cancel AGENT_ID to cancel a turn, /stop AGENT_ID to stop a
