@@ -121,7 +121,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--server",
         action="store_true",
-        help="Run the shared Agent Room backend for this workdir and exit with it",
+        help="Start or reuse the shared Agent Room backend, then run the CLI",
     )
     parser.add_argument(
         "--server-port",
@@ -388,8 +388,7 @@ def main() -> None:
 
     _change_to_requested_workdir(args)
 
-    if _run_agent_room_server_if_requested(args):
-        return
+    _start_agent_room_server_if_requested(args)
 
     # Must run before `cwd` is read and before run_cli so that session lookups
     # (-c / --resume picker) scope to the worktree directory.
@@ -452,40 +451,31 @@ def main() -> None:
     _run_cli_with_worktree_cleanup(args, worktree_session, resolve_trusted_folder)
 
 
-def _run_agent_room_server(
-    workdir: Path, *, port: int = 4173, network_mode: str = "auto"
-) -> None:
-    server = Path(__file__).resolve().parents[2] / "web" / "agent-room" / "server.py"
-    if not server.is_file():
-        raise SystemExit(
-            "Agent Room server is unavailable. Run --server from the hackathon "
-            "source checkout."
-        )
-    command = [
-        sys.executable,
-        str(server),
-        "--port",
-        str(port),
-        "--workdir",
-        str(workdir.resolve()),
-        "--network-mode",
-        network_mode,
-    ]
-    try:
-        os.execv(sys.executable, command)
-    except OSError as error:
-        raise SystemExit(f"Could not start Agent Room server: {error}") from error
-
-
-def _run_agent_room_server_if_requested(args: argparse.Namespace) -> bool:
+def _start_agent_room_server_if_requested(args: argparse.Namespace) -> None:
     if not args.server:
-        return False
+        return
     if args.worktree:
         raise SystemExit("--server cannot be combined with --worktree")
-    _run_agent_room_server(
-        Path.cwd(), port=args.server_port, network_mode=args.server_network_mode
+    from rich import print as rprint
+
+    from vibe.core.agent_room import AgentRoomUnavailable, ensure_agent_room_backend
+
+    rprint("[dim]Starting or finding the shared Agent Room...[/]", file=sys.stderr)
+    try:
+        url = ensure_agent_room_backend(
+            Path.cwd(),
+            port=args.server_port,
+            network_mode=args.server_network_mode,
+        )
+    except AgentRoomUnavailable as error:
+        raise SystemExit(f"Could not start Agent Room: {error}") from error
+    os.environ["VIBE_AGENT_ROOM_URL"] = url
+    os.environ["VIBE_AGENT_ROOM_AUTOSTART"] = "0"
+    web_url = f"{url}/web/agent-room/"
+    rprint(
+        f"[green]Agent Room ready:[/] [link={web_url}]{web_url}[/link]",
+        file=sys.stderr,
     )
-    return True
 
 
 def _run_cli_with_worktree_cleanup(

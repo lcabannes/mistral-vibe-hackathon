@@ -58,33 +58,24 @@ Configure the Mistral API key once. The interactive setup saves it under
 uv run --no-dev vibe --setup
 ```
 
-### 2. Start the shared backend and webpage
+### 2. Start Vibe, the shared backend, and the webpage
 
-From the repository checkout, run this in terminal 1 and leave it running:
+From the repository checkout, run one command:
 
 ```bash
 uv run --no-dev vibe --server
 ```
 
-Open <http://127.0.0.1:4173/web/agent-room/>. `auto` is the recommended
+`vibe --server` starts or reuses the backend in the background and then opens
+the interactive CLI. Press `Ctrl+1` for **Home** and select **Open Agent Room**
+to open the webpage. The default URL is
+<http://127.0.0.1:4173/web/agent-room/>. `auto` is the recommended
 network mode: it keeps a working proxy and bypasses an inherited proxy that
 rejects Mistral API traffic. Pass `--server-network-mode direct` to always
 bypass shell proxy settings, or `--server-network-mode inherit` to always keep
 them. Use `--server-port PORT` to select another loopback port.
 
-### 3. Start the synced CLI
-
-Run this in terminal 2 from the same checkout:
-
-```bash
-uv run --no-dev vibe
-```
-
-The CLI discovers the backend started by `--server` through `~/.vibe`. When a
-custom port is used, set `VIBE_AGENT_ROOM_URL`, for example
-`VIBE_AGENT_ROOM_URL=http://127.0.0.1:4183 uv run --no-dev vibe`.
-
-Press `Ctrl+1` to open **Home**. Select any agent to compare its conversation
+Select any agent to compare its conversation
 and status with the webpage, send another message, cancel or stop work, resolve
 approvals, or answer questions. Stopped and failed agents remain selectable;
 sending a message resumes the same session and worktree.

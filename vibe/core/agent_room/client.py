@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 from typing import Any
 from uuid import uuid4
 
@@ -20,6 +21,7 @@ from vibe.core.types import LLMUsage
 DEFAULT_AGENT_ROOM_URL = "http://127.0.0.1:4173"
 AGENT_ROOM_DISCOVERY_FILE = "agent-room/server.json"
 POLL_INTERVAL_SECONDS = 1.0
+BACKEND_STARTUP_TIMEOUT_SECONDS = 45.0
 
 type AgentRoomListener = Callable[[AgentRoomSnapshot], None]
 
@@ -51,8 +53,14 @@ def discover_agent_room() -> str | None:
     return url.rstrip("/")
 
 
-def launch_agent_room_backend(workdir: Path) -> bool:
-    if os.environ.get("VIBE_AGENT_ROOM_AUTOSTART", "1") == "0":
+def launch_agent_room_backend(
+    workdir: Path,
+    *,
+    port: int = 4173,
+    network_mode: str = "auto",
+    force: bool = False,
+) -> bool:
+    if not force and os.environ.get("VIBE_AGENT_ROOM_AUTOSTART", "1") == "0":
         return False
     repository_root = Path(__file__).resolve().parents[3]
     server = repository_root / "web" / "agent-room" / "server.py"
@@ -69,7 +77,16 @@ def launch_agent_room_backend(workdir: Path) -> bool:
         if git_repository.returncode != 0:
             return False
         subprocess.Popen(
-            [sys.executable, str(server), "--port", "4173", "--workdir", str(workdir)],
+            [
+                sys.executable,
+                str(server),
+                "--port",
+                str(port),
+                "--workdir",
+                str(workdir),
+                "--network-mode",
+                network_mode,
+            ],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -78,6 +95,50 @@ def launch_agent_room_backend(workdir: Path) -> bool:
     except (OSError, subprocess.SubprocessError):
         return False
     return True
+
+
+def _agent_room_reachable(url: str, *, timeout: float = 0.5) -> bool:
+    try:
+        with httpx.Client(base_url=url, timeout=timeout, trust_env=False) as client:
+            response = client.get("/api/agent-runs")
+            response.raise_for_status()
+            payload = response.json()
+    except (httpx.HTTPError, ValueError):
+        return False
+    return isinstance(payload, dict) and payload.get("connected") is True
+
+
+def ensure_agent_room_backend(
+    workdir: Path,
+    *,
+    port: int = 4173,
+    network_mode: str = "auto",
+    startup_timeout: float = BACKEND_STARTUP_TIMEOUT_SECONDS,
+) -> str:
+    """Return a healthy shared backend URL, starting one when necessary."""
+    discovered = discover_agent_room()
+    if discovered is not None and _agent_room_reachable(discovered):
+        return discovered
+
+    target = f"http://127.0.0.1:{port}"
+    if target != discovered and _agent_room_reachable(target):
+        return target
+    if not launch_agent_room_backend(
+        workdir, port=port, network_mode=network_mode, force=True
+    ):
+        raise AgentRoomUnavailable(
+            "Agent Room server is unavailable from this Vibe installation"
+        )
+
+    deadline = time.monotonic() + startup_timeout
+    while time.monotonic() < deadline:
+        if _agent_room_reachable(target):
+            return target
+        time.sleep(0.1)
+    raise AgentRoomUnavailable(
+        f"Agent Room did not become ready at {target} within "
+        f"{startup_timeout:g} seconds"
+    )
 
 
 class AgentRoomClient:

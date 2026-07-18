@@ -1011,8 +1011,12 @@ class VibeApp(App):  # noqa: PLR0904
         if self._agent_room_connected and self._agent_room_snapshot is not None:
             branch = self._agent_room_snapshot.workspace.get("integration_branch")
             scope = f"Agent Room · {branch}" if branch else "Agent Room"
+            client = self._agent_room_client
+            web_url = (
+                f"{client.base_url}/web/agent-room/" if client is not None else None
+            )
             return OfficeViewModel(
-                snapshot or self._workspace_activity_snapshot(), scope
+                snapshot or self._workspace_activity_snapshot(), scope, web_url
             )
         service = self._team_workspace_service
         return OfficeViewModel(
@@ -1361,9 +1365,7 @@ class VibeApp(App):  # noqa: PLR0904
         if not self.screen_stack:
             return
         activity_snapshot = team_activity_snapshot(snapshot)
-        self.query_one(HomePage).update_view(
-            OfficeViewModel(activity_snapshot, snapshot.identity.display_name)
-        )
+        self.query_one(HomePage).update_view(self._home_view_model(activity_snapshot))
         self.query_one(CoworkersPage).update_view(coworkers_view(snapshot))
 
     def _refresh_workspace_pages(self) -> None:

@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 from textual import on
 from textual.app import App, ComposeResult
-from textual.widgets import Input, OptionList, Static
+from textual.widgets import Input, Link, OptionList, Static
 
 from vibe.cli.textual_ui.widgets.mcp_app import MCPApp
 from vibe.cli.textual_ui.widgets.navigable_option_list import NavigableOptionList
@@ -464,6 +464,26 @@ async def test_home_auto_selects_agent_and_renders_complete_conversation() -> No
         assert detail.display
         assert "retained message 0" in rendered
         assert "retained message 19" in rendered
+
+
+@pytest.mark.asyncio
+async def test_home_displays_clickable_agent_room_link() -> None:
+    app = _PagesApp()
+    room_url = "http://127.0.0.1:4183/web/agent-room/"
+
+    async with app.run_test(size=(100, 26)) as pilot:
+        app.office.update_view(
+            OfficeViewModel(
+                AgentActivitySnapshot(session_id="room"),
+                server_url=room_url,
+            )
+        )
+        await pilot.pause()
+
+        link = app.office.query_one("#office-room-link", Link)
+        assert link.display
+        assert link.url == room_url
+        assert str(link.render()) == "Open Agent Room"
 
 
 @pytest.mark.asyncio

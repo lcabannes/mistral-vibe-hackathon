@@ -4,6 +4,7 @@ from vibe.core.agent_room.client import (
     AgentRoomClient,
     AgentRoomUnavailable,
     discover_agent_room,
+    ensure_agent_room_backend,
     launch_agent_room_backend,
 )
 from vibe.core.agent_room.models import (
@@ -19,5 +20,6 @@ __all__ = [
     "AgentRoomSnapshot",
     "AgentRoomUnavailable",
     "discover_agent_room",
+    "ensure_agent_room_backend",
     "launch_agent_room_backend",
 ]

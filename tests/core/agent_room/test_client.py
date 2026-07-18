@@ -10,6 +10,7 @@ import pytest
 from vibe.core.agent_room.client import (
     AgentRoomClient,
     discover_agent_room,
+    ensure_agent_room_backend,
     launch_agent_room_backend,
 )
 from vibe.core.agents.models import ManagedAgentState
@@ -211,3 +212,47 @@ def test_backend_autostart_can_be_disabled(
     monkeypatch.setenv("VIBE_AGENT_ROOM_AUTOSTART", "0")
 
     assert launch_agent_room_backend(tmp_path) is False
+
+
+def test_ensure_backend_reuses_healthy_discovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "vibe.core.agent_room.client.discover_agent_room",
+        lambda: "http://127.0.0.1:4321",
+    )
+    monkeypatch.setattr(
+        "vibe.core.agent_room.client._agent_room_reachable", lambda _url: True
+    )
+
+    assert ensure_agent_room_backend(tmp_path) == "http://127.0.0.1:4321"
+
+
+def test_ensure_backend_starts_requested_port_and_waits_until_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reachable = iter((False, True))
+    launched: list[tuple[Path, int, str, bool]] = []
+    monkeypatch.setattr(
+        "vibe.core.agent_room.client.discover_agent_room", lambda: None
+    )
+    monkeypatch.setattr(
+        "vibe.core.agent_room.client._agent_room_reachable",
+        lambda _url: next(reachable),
+    )
+
+    def launch(
+        workdir: Path, *, port: int, network_mode: str, force: bool
+    ) -> bool:
+        launched.append((workdir, port, network_mode, force))
+        return True
+
+    monkeypatch.setattr(
+        "vibe.core.agent_room.client.launch_agent_room_backend", launch
+    )
+
+    assert (
+        ensure_agent_room_backend(tmp_path, port=4183, network_mode="direct")
+        == "http://127.0.0.1:4183"
+    )
+    assert launched == [(tmp_path, 4183, "direct", True)]

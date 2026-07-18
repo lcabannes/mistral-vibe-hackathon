@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
 
-from vibe.cli.entrypoint import _run_agent_room_server, parse_arguments
+from vibe.cli.entrypoint import _start_agent_room_server_if_requested, parse_arguments
 
 
 def _parse(monkeypatch: pytest.MonkeyPatch, argv: list[str]):
@@ -49,29 +50,30 @@ def test_server_rejects_invalid_port(monkeypatch: pytest.MonkeyPatch) -> None:
         _parse(monkeypatch, ["--server", "--server-port", "70000"])
 
 
-def test_server_executes_shared_backend_for_workdir(
+def test_server_starts_backend_and_continues_with_shared_url(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    executed: list[tuple[str, list[str]]] = []
+    calls: list[tuple[Path, int, str]] = []
+
+    def ensure(workdir: Path, *, port: int, network_mode: str) -> str:
+        calls.append((workdir, port, network_mode))
+        return "http://127.0.0.1:4183"
+
     monkeypatch.setattr(
-        "vibe.cli.entrypoint.os.execv",
-        lambda executable, command: executed.append((executable, command)),
+        "vibe.core.agent_room.ensure_agent_room_backend",
+        ensure,
+    )
+    monkeypatch.chdir(tmp_path)
+    args = _parse(
+        monkeypatch,
+        ["--server", "--server-port", "4183", "--server-network-mode", "direct"],
     )
 
-    _run_agent_room_server(tmp_path, port=4183, network_mode="direct")
+    _start_agent_room_server_if_requested(args)
 
-    assert len(executed) == 1
-    executable, command = executed[0]
-    assert command[0] == executable
-    assert command[1].endswith("web/agent-room/server.py")
-    assert command[2:] == [
-        "--port",
-        "4183",
-        "--workdir",
-        str(tmp_path.resolve()),
-        "--network-mode",
-        "direct",
-    ]
+    assert calls == [(tmp_path, 4183, "direct")]
+    assert os.environ["VIBE_AGENT_ROOM_URL"] == "http://127.0.0.1:4183"
+    assert os.environ["VIBE_AGENT_ROOM_AUTOSTART"] == "0"
 
 
 def test_team_join_defaults_to_marker_only_history(

@@ -10,7 +10,7 @@ from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.timer import Timer
 from textual.widget import Widget
-from textual.widgets import Button, Input, OptionList, Static
+from textual.widgets import Button, Input, Link, OptionList, Static
 from textual.widgets.option_list import Option, OptionDoesNotExist
 
 from vibe.cli.textual_ui.widgets.navigable_option_list import NavigableOptionList
@@ -115,6 +115,7 @@ class HomeViewModel:
 class OfficeViewModel:
     snapshot: AgentActivitySnapshot
     scope_label: str | None = None
+    server_url: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -810,12 +811,24 @@ class HomePage(ResponsiveWorkspacePage):
     }
 
     HomePage #office-summary {
+        width: 1fr;
         height: 2;
         color: $text-muted;
 
         &:ansi {
             text-style: dim;
         }
+    }
+
+    HomePage #office-summary-row {
+        width: 1fr;
+        height: 2;
+        layout: horizontal;
+    }
+
+    HomePage #office-room-link {
+        width: auto;
+        height: 1;
     }
 
     HomePage #office-detail {
@@ -871,7 +884,17 @@ class HomePage(ResponsiveWorkspacePage):
 
     def compose(self) -> ComposeResult:
         yield Static("Home", classes="workspace-title")
-        yield Static(self._summary_text(), id="office-summary")
+        with Horizontal(id="office-summary-row"):
+            yield Static(self._summary_text(), id="office-summary")
+            room_url = self._view.server_url or ""
+            link = Link(
+                "Open Agent Room",
+                url=room_url,
+                tooltip=room_url or None,
+                id="office-room-link",
+            )
+            link.display = bool(room_url)
+            yield link
         with Horizontal(id="office-body"):
             with Container(id="office-agent-grid"):
                 yield from self._cards()
@@ -915,6 +938,10 @@ class HomePage(ResponsiveWorkspacePage):
         if not self.is_mounted:
             return
         self.query_one("#office-summary", Static).update(self._summary_text())
+        room_link = self.query_one("#office-room-link", Link)
+        room_link.url = self._view.server_url or ""
+        room_link.tooltip = self._view.server_url
+        room_link.display = self._view.server_url is not None
         self._refresh_cards()
         self._refresh_detail()
 
