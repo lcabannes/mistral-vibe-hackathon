@@ -82,6 +82,8 @@ class TaskExecutionResult(_StrictExecutionModel):
 
 
 class TaskExecutionPort(Protocol):
+    """Execution adapters must make repeated handoffs idempotent by ``run_id``."""
+
     def is_profile_available(self, profile: str) -> bool: ...
 
     async def handoff(self, request: TaskExecutionRequest) -> TaskExecutionResult: ...

@@ -13,7 +13,10 @@ TASK_CENTER_SCHEMA_VERSION = 1
 MAX_TASK_TITLE_LENGTH = 200
 MAX_TASK_DETAILS_LENGTH = 10_000
 MAX_TASK_ERROR_LENGTH = 2_000
+MAX_TASK_CLAIM_OWNER_LENGTH = 200
 MAX_TASK_RUN_HISTORY = 20
+MAX_TASK_TRIGGER_INDEX = 1_024
+TASK_TRIGGER_RETENTION_DAYS = 30
 TASK_ID_PATTERN = r"^task_[a-f0-9]{32}$"
 RUN_ID_PATTERN = r"^run_[a-f0-9]{32}$"
 PROFILE_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
@@ -191,9 +194,32 @@ class TaskRunRecord(_StrictModel):
     triggered_at: datetime
     coalesced: bool = False
     error: str | None = Field(default=None, max_length=MAX_TASK_ERROR_LENGTH)
+    claim_owner: str | None = Field(
+        default=None, min_length=1, max_length=MAX_TASK_CLAIM_OWNER_LENGTH
+    )
+    claim_expires_at: datetime | None = None
 
     _scheduled_for = field_validator("scheduled_for")(_optional_aware_utc)
     _triggered_at = field_validator("triggered_at")(_aware_utc)
+    _claim_expires_at = field_validator("claim_expires_at")(_optional_aware_utc)
+
+    @model_validator(mode="after")
+    def validate_claim(self) -> TaskRunRecord:
+        if (self.claim_owner is None) != (self.claim_expires_at is None):
+            raise ValueError("claim owner and expiry must be set together")
+        if self.claim_owner is not None and self.state not in {
+            TaskRunState.READY,
+            TaskRunState.RETRY_PENDING,
+        }:
+            raise ValueError("only pending task runs can retain a dispatch claim")
+        return self
+
+
+class TaskTriggerReceipt(_StrictModel):
+    trigger_instance_id: str = Field(min_length=1, max_length=200)
+    recorded_at: datetime
+
+    _recorded_at = field_validator("recorded_at")(_aware_utc)
 
 
 class TaskDefinition(_StrictModel):
@@ -210,7 +236,9 @@ class TaskDefinition(_StrictModel):
     last_run_at: datetime | None = None
     next_run_at: datetime | None = None
     last_error: str | None = Field(default=None, max_length=MAX_TASK_ERROR_LENGTH)
-    trigger_index: tuple[Annotated[str, Field(min_length=1, max_length=200)], ...] = ()
+    trigger_index: tuple[TaskTriggerReceipt, ...] = Field(
+        default=(), max_length=MAX_TASK_TRIGGER_INDEX
+    )
     run_history: tuple[TaskRunRecord, ...] = ()
 
     _title = field_validator("title")(_nonblank)
@@ -224,38 +252,48 @@ class TaskDefinition(_StrictModel):
     @model_validator(mode="before")
     @classmethod
     def populate_legacy_trigger_index(cls, value: object) -> object:
-        if not isinstance(value, dict) or "trigger_index" in value:
+        if not isinstance(value, dict):
             return value
         runs = value.get("run_history")
-        if not isinstance(runs, (list, tuple)):
+        fallback_timestamp = value.get("updated_at")
+        history_timestamps: dict[str, object] = {}
+        if isinstance(runs, (list, tuple)):
+            for run in runs:
+                if isinstance(run, TaskRunRecord):
+                    history_timestamps[run.trigger_instance_id] = run.triggered_at
+                    continue
+                if isinstance(run, dict) and isinstance(
+                    trigger_instance_id := run.get("trigger_instance_id"), str
+                ):
+                    history_timestamps[trigger_instance_id] = run.get(
+                        "triggered_at", fallback_timestamp
+                    )
+        raw_index = value.get("trigger_index", tuple(history_timestamps))
+        if not isinstance(raw_index, (list, tuple)):
             return value
-        trigger_index: list[str] = []
-        for run in runs:
-            if isinstance(run, TaskRunRecord):
-                trigger_index.append(run.trigger_instance_id)
+        trigger_index: list[object] = []
+        for receipt in raw_index[-MAX_TASK_TRIGGER_INDEX:]:
+            if isinstance(receipt, str):
+                trigger_index.append({
+                    "trigger_instance_id": receipt,
+                    "recorded_at": history_timestamps.get(receipt, fallback_timestamp),
+                })
                 continue
-            if isinstance(run, dict) and isinstance(
-                trigger_instance_id := run.get("trigger_instance_id"), str
-            ):
-                trigger_index.append(trigger_instance_id)
+            trigger_index.append(receipt)
         updated = dict(value)
-        updated["trigger_index"] = tuple(dict.fromkeys(trigger_index))
+        updated["trigger_index"] = tuple(trigger_index)
         return updated
 
     @model_validator(mode="after")
     def validate_timestamps(self) -> TaskDefinition:
         if self.updated_at < self.created_at:
             raise ValueError("updated_at must not precede created_at")
-        if len(self.trigger_index) != len(set(self.trigger_index)):
+        trigger_ids = [receipt.trigger_instance_id for receipt in self.trigger_index]
+        if len(trigger_ids) != len(set(trigger_ids)):
             raise ValueError("trigger index entries must be unique")
         run_ids = [run.run_id for run in self.run_history]
         if len(run_ids) != len(set(run_ids)):
             raise ValueError("task run ids must be unique")
-        history_triggers = tuple(
-            dict.fromkeys(run.trigger_instance_id for run in self.run_history)
-        )
-        if not set(history_triggers).issubset(self.trigger_index):
-            raise ValueError("trigger index must contain every retained run")
         return self
 
     @property

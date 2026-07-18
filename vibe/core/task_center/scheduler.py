@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncGenerator, Callable, Coroutine
 from contextlib import suppress
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import hashlib
 from typing import Any, cast
 from uuid import uuid4
@@ -25,6 +25,7 @@ from vibe.core.task_center.models import (
     TaskRunRecord,
     TaskRunState,
     TaskSourceEvent,
+    TaskTrigger,
     TaskTriggeredEvent,
 )
 from vibe.core.task_center.schedule import next_occurrence
@@ -32,6 +33,7 @@ from vibe.core.task_center.store import TaskNotFoundError, TaskStore
 
 TASK_EVENT_QUEUE_SIZE = 64
 INTERRUPTED_DISPATCH_ERROR = "Task dispatch interrupted; retry pending"
+DEFAULT_TASK_RUN_CLAIM_LEASE_SECONDS = 300.0
 
 type Clock = Callable[[], datetime]
 
@@ -47,15 +49,25 @@ class TaskScheduler:
         *,
         execution_port: TaskExecutionPort | None = None,
         clock: Clock = _utc_now,
+        claim_lease_seconds: float = DEFAULT_TASK_RUN_CLAIM_LEASE_SECONDS,
     ) -> None:
+        if claim_lease_seconds <= 0:
+            raise ValueError("claim lease must be positive")
         self._store = store
         self._execution_port = execution_port
         self._clock = clock
         self._timer: asyncio.TimerHandle | None = None
         self._deadline_dispatch: asyncio.Task[None] | None = None
         self._inflight: set[asyncio.Task[object]] = set()
+        self._dispatching_run_ids: set[str] = set()
         self._trigger_lock = asyncio.Lock()
+        self._deadline_lock = asyncio.Lock()
+        self._lifecycle_lock = asyncio.Lock()
+        self._startup_task: asyncio.Task[None] | None = None
         self._subscribers: set[asyncio.Queue[TaskTriggeredEvent | None]] = set()
+        self._owner_token = f"scheduler_{uuid4().hex}"
+        self._claim_lease_seconds = claim_lease_seconds
+        self._claim_renew_interval = max(0.05, claim_lease_seconds / 3)
         self._started = False
 
     @property
@@ -64,39 +76,67 @@ class TaskScheduler:
 
     @property
     def next_deadline(self) -> datetime | None:
-        deadlines = [
+        deadlines: list[datetime] = [
             task.next_run_at
             for task in self._store.snapshot
             if task.enabled and task.next_run_at is not None
         ]
+        deadlines.extend(
+            run.claim_expires_at
+            for task in self._store.snapshot
+            for run in task.run_history
+            if run.state in {TaskRunState.READY, TaskRunState.RETRY_PENDING}
+            and run.claim_owner not in {None, self._owner_token}
+            and run.claim_expires_at is not None
+        )
         return min(deadlines) if deadlines else None
 
     async def start(self) -> None:
-        if self._started:
-            return
+        async with self._lifecycle_lock:
+            if self._started and self._startup_task is None:
+                return
+            if self._startup_task is None:
+                self._started = True
+                self._startup_task = asyncio.create_task(
+                    self._start_impl(), name="vibe-task-center-start"
+                )
+            startup = self._startup_task
+        try:
+            await asyncio.shield(startup)
+        finally:
+            async with self._lifecycle_lock:
+                if self._startup_task is startup and startup.done():
+                    self._startup_task = None
+
+    async def _start_impl(self) -> None:
         await self._store.load()
-        self._started = True
+        if not self._started:
+            return
         self._store.add_listener(self._on_store_changed)
         try:
             await self._await_tracked(
-                self._recover_pending(), name="vibe-task-center-recovery"
-            )
-            await self._await_tracked(
-                self._dispatch_due(self._now()), name="vibe-task-center-startup"
+                self._run_deadline_dispatch(), name="vibe-task-center-startup"
             )
         except BaseException:
-            await self.stop()
+            self._started = False
+            self._store.remove_listener(self._on_store_changed)
+            if self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
             raise
-        self._reschedule_timer()
+        if self._started:
+            self._reschedule_timer()
 
     async def stop(self) -> None:
-        if not self._started and not self._inflight:
-            return
-        self._started = False
-        self._store.remove_listener(self._on_store_changed)
-        if self._timer is not None:
-            self._timer.cancel()
-            self._timer = None
+        async with self._lifecycle_lock:
+            startup = self._startup_task
+            if not self._started and not self._inflight and startup is None:
+                return
+            self._started = False
+            self._store.remove_listener(self._on_store_changed)
+            if self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
         while self._inflight:
             inflight = tuple(self._inflight)
             for task in inflight:
@@ -104,6 +144,9 @@ class TaskScheduler:
             for task in inflight:
                 with suppress(asyncio.CancelledError, Exception):
                     await task
+        if startup is not None and startup is not asyncio.current_task():
+            with suppress(asyncio.CancelledError, Exception):
+                await startup
         self._deadline_dispatch = None
         subscribers = tuple(self._subscribers)
         self._subscribers.clear()
@@ -139,6 +182,7 @@ class TaskScheduler:
             result = await self._await_tracked(
                 self._trigger_task(
                     task,
+                    expected_trigger=task.trigger,
                     trigger_instance_id=instance_id,
                     triggered_at=self._now(),
                     scheduled_for=None,
@@ -163,6 +207,7 @@ class TaskScheduler:
         return await self._await_tracked(
             self._trigger_task(
                 task,
+                expected_trigger=task.trigger,
                 trigger_instance_id=instance_id,
                 triggered_at=self._now(),
                 scheduled_for=None,
@@ -211,7 +256,9 @@ class TaskScheduler:
             self._reschedule_timer()
 
     async def _run_deadline_dispatch(self) -> None:
-        await self._dispatch_due(self._now())
+        async with self._deadline_lock:
+            await self._recover_pending()
+            await self._dispatch_due(self._now())
 
     async def _recover_pending(self) -> None:
         for task in self._store.snapshot:
@@ -223,8 +270,23 @@ class TaskScheduler:
                 ),
                 None,
             )
-            if pending is not None:
-                await self._resume_run(task, pending)
+            if pending is None or pending.run_id in self._dispatching_run_ids:
+                continue
+            now = self._now()
+            claim = await self._store.claim_run(
+                task.task_id,
+                pending.run_id,
+                owner_token=self._owner_token,
+                claimed_at=now,
+                claim_expires_at=self._claim_expiry(now),
+            )
+            if not claim.claimed or claim.run is None:
+                continue
+            self._dispatching_run_ids.add(pending.run_id)
+            try:
+                await self._resume_run(claim.task, claim.run)
+            finally:
+                self._dispatching_run_ids.discard(pending.run_id)
 
     async def _dispatch_due(self, now: datetime) -> None:
         due = sorted(
@@ -242,6 +304,7 @@ class TaskScheduler:
             assert scheduled_for is not None
             await self._trigger_task(
                 task,
+                expected_trigger=task.trigger,
                 trigger_instance_id=_stable_instance_id(
                     "schedule", task.task_id, scheduled_for.isoformat()
                 ),
@@ -254,6 +317,7 @@ class TaskScheduler:
         self,
         task: TaskDefinition,
         *,
+        expected_trigger: TaskTrigger,
         trigger_instance_id: str,
         triggered_at: datetime,
         scheduled_for: datetime | None,
@@ -264,6 +328,10 @@ class TaskScheduler:
             async with self._trigger_lock:
                 current = await self._store.get(task.task_id)
                 if not current.enabled or not self._started:
+                    return None
+                if current.trigger != expected_trigger:
+                    return None
+                if scheduled_for is not None and current.next_run_at != scheduled_for:
                     return None
                 next_run_at = (
                     next_occurrence(
@@ -284,16 +352,27 @@ class TaskScheduler:
                     scheduled_for=scheduled_for,
                     triggered_at=triggered_at,
                     coalesced=coalesced,
+                    claim_owner=self._owner_token,
+                    claim_expires_at=self._claim_expiry(triggered_at),
                 )
                 recorded = await self._store.record_trigger(
-                    current.task_id, run, next_run_at=next_run_at
+                    current.task_id,
+                    run,
+                    next_run_at=next_run_at,
+                    expected_trigger=expected_trigger,
+                    expected_next_run_at=scheduled_for,
+                    require_next_run_match=scheduled_for is not None,
                 )
                 if not recorded.created:
                     return None
                 event = _event_from_run(current, run)
                 self._emit(event)
-            handoff = await self._handoff(current, run_id)
-            await self._persist_handoff(current.task_id, run_id, handoff)
+            self._dispatching_run_ids.add(run_id)
+            try:
+                handoff = await self._handoff_with_claim(current, run_id)
+                await self._persist_handoff(current.task_id, run_id, handoff)
+            finally:
+                self._dispatching_run_ids.discard(run_id)
             return event
         except asyncio.CancelledError:
             if run_id is not None:
@@ -306,7 +385,7 @@ class TaskScheduler:
         try:
             event = _event_from_run(task, run)
             self._emit(event)
-            handoff = await self._handoff(task, run.run_id)
+            handoff = await self._handoff_with_claim(task, run.run_id)
             await self._persist_handoff(task.task_id, run.run_id, handoff)
             return event
         except asyncio.CancelledError:
@@ -343,6 +422,34 @@ class TaskScheduler:
         except Exception as error:
             return _blocked_result(str(error) or type(error).__name__)
 
+    async def _handoff_with_claim(
+        self, task: TaskDefinition, run_id: str
+    ) -> TaskExecutionResult:
+        renewal = asyncio.create_task(
+            self._renew_claim(task.task_id, run_id),
+            name=f"vibe-task-center-claim-{run_id}",
+        )
+        try:
+            return await self._handoff(task, run_id)
+        finally:
+            renewal.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await renewal
+
+    async def _renew_claim(self, task_id: str, run_id: str) -> None:
+        while True:
+            await asyncio.sleep(self._claim_renew_interval)
+            now = self._now()
+            renewed = await self._store.renew_run_claim(
+                task_id,
+                run_id,
+                owner_token=self._owner_token,
+                renewed_at=now,
+                claim_expires_at=self._claim_expiry(now),
+            )
+            if not renewed:
+                return
+
     async def _persist_handoff(
         self, task_id: str, run_id: str, result: TaskExecutionResult
     ) -> None:
@@ -360,13 +467,17 @@ class TaskScheduler:
             authorization=result.authorization,
             error=result.error,
             managed_agent_id=result.managed_agent_id,
+            expected_claim_owner=self._owner_token,
         )
         await _complete_before_cancellation(operation)
 
     async def _reconcile_interrupted(self, task_id: str, run_id: str) -> None:
         operation = asyncio.create_task(
             self._store.mark_retry_pending(
-                task_id, run_id, error=INTERRUPTED_DISPATCH_ERROR
+                task_id,
+                run_id,
+                owner_token=self._owner_token,
+                error=INTERRUPTED_DISPATCH_ERROR,
             )
         )
         while True:
@@ -419,6 +530,9 @@ class TaskScheduler:
     def _require_running(self) -> None:
         if not self._started:
             raise RuntimeError("Task scheduler is not running")
+
+    def _claim_expiry(self, now: datetime) -> datetime:
+        return now + timedelta(seconds=self._claim_lease_seconds)
 
     def _now(self) -> datetime:
         now = self._clock()

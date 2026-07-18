@@ -27,10 +27,15 @@ from vibe.core.task_center import (
     TaskStoreVersionError,
     TaskStoreWriteError,
     TaskTriggerKind,
+    TaskTriggerReceipt,
     TaskUpdate,
     Weekday,
     WeeklyTrigger,
     store as store_module,
+)
+from vibe.core.task_center.models import (
+    MAX_TASK_TRIGGER_INDEX,
+    TASK_TRIGGER_RETENTION_DAYS,
 )
 
 
@@ -222,6 +227,34 @@ async def test_atomic_replace_failure_preserves_previous_file(
 
 
 @pytest.mark.asyncio
+async def test_oversized_serialization_is_rejected_before_replace(
+    tmp_path, task_ids
+) -> None:
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    store = _store(tmp_path, task_ids, now)
+    await store.create(TaskCreate(title="Original"))
+    previous = store.path.read_bytes()
+    oversized = TaskCenterDocument(
+        tasks=tuple(
+            TaskDefinition(
+                task_id=f"task_{index:032x}",
+                title=f"Task {index}",
+                details="x" * 10_000,
+                created_at=now,
+                updated_at=now,
+            )
+            for index in range(250)
+        )
+    )
+
+    with pytest.raises(TaskStoreWriteError, match="size limit"):
+        store._write_document(oversized)
+
+    assert store.path.read_bytes() == previous
+    assert list(store.path.parent.glob(f".{store.path.name}.*.tmp")) == []
+
+
+@pytest.mark.asyncio
 async def test_path_lock_prevents_two_stores_from_losing_updates(tmp_path) -> None:
     path = tmp_path / ".vibe" / "tasks.toml"
     now = datetime(2026, 1, 1, tzinfo=UTC)
@@ -302,6 +335,78 @@ async def test_run_history_is_bounded(tmp_path, task_ids) -> None:
     assert history[-1].trigger_instance_id == "manual-24"
     assert len(persisted.trigger_index) == 25
     assert persisted.state is TaskState.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_trigger_receipts_prune_by_count_and_age(tmp_path, task_ids) -> None:
+    now = datetime(2026, 2, 1, tzinfo=UTC)
+    store = _store(tmp_path, task_ids, now)
+    task_id = next(task_ids)
+    receipts = tuple(
+        TaskTriggerReceipt(trigger_instance_id=f"receipt-{index}", recorded_at=now)
+        for index in range(MAX_TASK_TRIGGER_INDEX)
+    )
+    definition = TaskDefinition(
+        task_id=task_id,
+        title="Receipts",
+        created_at=now,
+        updated_at=now,
+        trigger_index=receipts,
+    )
+    store._write_document(TaskCenterDocument(tasks=(definition,)))
+    await store.load()
+    run = TaskRunRecord(
+        run_id=f"run_{1:032x}",
+        trigger_instance_id="new-receipt",
+        trigger_kind=TaskTriggerKind.MANUAL,
+        state=TaskRunState.READY,
+        triggered_at=now,
+    )
+
+    await store.record_trigger(task_id, run, next_run_at=None)
+
+    count_pruned = await store.get(task_id)
+    count_ids = {receipt.trigger_instance_id for receipt in count_pruned.trigger_index}
+    assert len(count_ids) == MAX_TASK_TRIGGER_INDEX
+    assert "receipt-0" not in count_ids
+    assert "new-receipt" in count_ids
+
+    await store.record_handoff(
+        task_id,
+        run.run_id,
+        state=TaskRunState.COMPLETED,
+        authorization=TaskExecutionAuthorization.ASK,
+    )
+    old_receipt = TaskTriggerReceipt(
+        trigger_instance_id="expired",
+        recorded_at=now - timedelta(days=TASK_TRIGGER_RETENTION_DAYS + 1),
+    )
+    current = await store.get(task_id)
+    store._write_document(
+        TaskCenterDocument(
+            tasks=(
+                current.model_copy(
+                    update={"trigger_index": (old_receipt, *current.trigger_index[-5:])}
+                ),
+            )
+        )
+    )
+    await store.load()
+    next_run = TaskRunRecord(
+        run_id=f"run_{2:032x}",
+        trigger_instance_id="after-expiry",
+        trigger_kind=TaskTriggerKind.MANUAL,
+        state=TaskRunState.READY,
+        triggered_at=now,
+    )
+
+    await store.record_trigger(task_id, next_run, next_run_at=None)
+
+    age_ids = {
+        receipt.trigger_instance_id
+        for receipt in (await store.get(task_id)).trigger_index
+    }
+    assert "expired" not in age_ids
 
 
 @pytest.mark.asyncio
@@ -391,7 +496,13 @@ async def test_legacy_active_runs_survive_terminal_pruning_until_completion(
         state=TaskState.RUNNING,
         created_at=now,
         updated_at=now,
-        trigger_index=tuple(run.trigger_instance_id for run in runs),
+        trigger_index=tuple(
+            TaskTriggerReceipt(
+                trigger_instance_id=run.trigger_instance_id,
+                recorded_at=run.triggered_at,
+            )
+            for run in runs
+        ),
         run_history=runs,
     )
     store._write_document(TaskCenterDocument(tasks=(definition,)))

@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import os
 from pathlib import Path
 import tempfile
@@ -17,9 +17,12 @@ import tomli_w
 
 from vibe.core.task_center._process_lock import process_file_lock
 from vibe.core.task_center.models import (
+    MAX_TASK_CLAIM_OWNER_LENGTH,
     MAX_TASK_ERROR_LENGTH,
     MAX_TASK_RUN_HISTORY,
+    MAX_TASK_TRIGGER_INDEX,
     TASK_CENTER_SCHEMA_VERSION,
+    TASK_TRIGGER_RETENTION_DAYS,
     TaskCenterDocument,
     TaskCreate,
     TaskDefinition,
@@ -27,6 +30,8 @@ from vibe.core.task_center.models import (
     TaskRunRecord,
     TaskRunState,
     TaskState,
+    TaskTrigger,
+    TaskTriggerReceipt,
     TaskUpdate,
 )
 from vibe.core.task_center.schedule import next_occurrence
@@ -69,6 +74,13 @@ class TaskTriggerRecordResult:
     task: TaskDefinition
     created: bool
     blocked_by_active_run: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class TaskRunClaimResult:
+    task: TaskDefinition
+    run: TaskRunRecord | None
+    claimed: bool
 
 
 def _utc_now() -> datetime:
@@ -225,7 +237,14 @@ class TaskStore:
         return self.snapshot
 
     async def record_trigger(
-        self, task_id: str, run: TaskRunRecord, *, next_run_at: datetime | None
+        self,
+        task_id: str,
+        run: TaskRunRecord,
+        *,
+        next_run_at: datetime | None,
+        expected_trigger: TaskTrigger | None = None,
+        expected_next_run_at: datetime | None = None,
+        require_next_run_match: bool = False,
     ) -> TaskTriggerRecordResult:
         created = False
         blocked_by_active_run = False
@@ -233,7 +252,14 @@ class TaskStore:
         def mutate(document: TaskCenterDocument) -> TaskCenterDocument:
             nonlocal blocked_by_active_run, created
             current = self._find(document, task_id)
-            if run.trigger_instance_id in current.trigger_index:
+            if expected_trigger is not None and current.trigger != expected_trigger:
+                return document
+            if require_next_run_match and current.next_run_at != expected_next_run_at:
+                return document
+            if any(
+                receipt.trigger_instance_id == run.trigger_instance_id
+                for receipt in current.trigger_index
+            ):
                 return document
             if any(item.run_id == run.run_id for item in current.run_history):
                 raise TaskConflictError(f"Task run already exists: {run.run_id}")
@@ -247,6 +273,16 @@ class TaskStore:
                 return self._replace_task(document, updated)
             created = True
             history = _prune_run_history((*current.run_history, run))
+            trigger_index = _prune_trigger_index(
+                (
+                    *current.trigger_index,
+                    TaskTriggerReceipt(
+                        trigger_instance_id=run.trigger_instance_id,
+                        recorded_at=run.triggered_at,
+                    ),
+                ),
+                now=run.triggered_at,
+            )
             updated = current.model_copy(
                 update={
                     "state": TaskState.READY,
@@ -254,7 +290,7 @@ class TaskStore:
                     "last_run_at": run.triggered_at,
                     "next_run_at": next_run_at,
                     "last_error": None,
-                    "trigger_index": (*current.trigger_index, run.trigger_instance_id),
+                    "trigger_index": trigger_index,
                     "run_history": history,
                 }
             )
@@ -276,6 +312,7 @@ class TaskStore:
         authorization: TaskExecutionAuthorization,
         error: str | None = None,
         managed_agent_id: str | None = None,
+        expected_claim_owner: str | None = None,
     ) -> TaskDefinition:
         now = self._now()
         bounded_error = error[:MAX_TASK_ERROR_LENGTH] if error else None
@@ -288,6 +325,13 @@ class TaskStore:
                 if run.run_id != run_id:
                     history.append(run)
                     continue
+                if (
+                    expected_claim_owner is not None
+                    and run.claim_owner != expected_claim_owner
+                ):
+                    raise TaskConflictError(
+                        f"Task run claim is no longer owned: {run_id}"
+                    )
                 found = True
                 history.append(
                     run.model_copy(
@@ -295,6 +339,8 @@ class TaskStore:
                             "state": state,
                             "authorization": authorization,
                             "error": bounded_error,
+                            "claim_owner": None,
+                            "claim_expires_at": None,
                         }
                     )
                 )
@@ -325,9 +371,103 @@ class TaskStore:
         await self._mutate(mutate, memory_update=update_runtime)
         return await self.get(task_id)
 
+    async def claim_run(
+        self,
+        task_id: str,
+        run_id: str,
+        *,
+        owner_token: str,
+        claimed_at: datetime,
+        claim_expires_at: datetime,
+    ) -> TaskRunClaimResult:
+        claimed = False
+
+        def mutate(document: TaskCenterDocument) -> TaskCenterDocument:
+            nonlocal claimed
+            current = self._find(document, task_id)
+            target = self._find_run(current, run_id)
+            if target.state not in {TaskRunState.READY, TaskRunState.RETRY_PENDING}:
+                return document
+            if (
+                target.claim_owner is not None
+                and target.claim_owner != owner_token
+                and target.claim_expires_at is not None
+                and target.claim_expires_at > claimed_at
+            ):
+                return document
+            claimed = True
+            updated_run = target.model_copy(
+                update={
+                    "claim_owner": owner_token,
+                    "claim_expires_at": claim_expires_at,
+                }
+            )
+            updated = current.model_copy(
+                update={
+                    "state": TaskState.READY,
+                    "updated_at": claimed_at,
+                    "run_history": tuple(
+                        updated_run if run.run_id == run_id else run
+                        for run in current.run_history
+                    ),
+                }
+            )
+            return self._replace_task(document, updated)
+
+        _validate_claim_window(claimed_at, claim_expires_at)
+        _validate_owner_token(owner_token)
+        await self._mutate(mutate, write_when_unchanged=False)
+        task = await self.get(task_id)
+        return TaskRunClaimResult(
+            task=task,
+            run=next((run for run in task.run_history if run.run_id == run_id), None),
+            claimed=claimed,
+        )
+
+    async def renew_run_claim(
+        self,
+        task_id: str,
+        run_id: str,
+        *,
+        owner_token: str,
+        renewed_at: datetime,
+        claim_expires_at: datetime,
+    ) -> bool:
+        renewed = False
+
+        def mutate(document: TaskCenterDocument) -> TaskCenterDocument:
+            nonlocal renewed
+            current = self._find(document, task_id)
+            target = self._find_run(current, run_id)
+            if (
+                target.state not in {TaskRunState.READY, TaskRunState.RETRY_PENDING}
+                or target.claim_owner != owner_token
+            ):
+                return document
+            renewed = True
+            updated_run = target.model_copy(
+                update={"claim_expires_at": claim_expires_at}
+            )
+            updated = current.model_copy(
+                update={
+                    "updated_at": renewed_at,
+                    "run_history": tuple(
+                        updated_run if run.run_id == run_id else run
+                        for run in current.run_history
+                    ),
+                }
+            )
+            return self._replace_task(document, updated)
+
+        _validate_claim_window(renewed_at, claim_expires_at)
+        _validate_owner_token(owner_token)
+        await self._mutate(mutate, write_when_unchanged=False)
+        return renewed
+
     async def mark_retry_pending(
-        self, task_id: str, run_id: str, *, error: str
+        self, task_id: str, run_id: str, *, owner_token: str, error: str
     ) -> TaskDefinition:
+        _validate_owner_token(owner_token)
         now = self._now()
         bounded_error = error[:MAX_TASK_ERROR_LENGTH]
 
@@ -336,10 +476,11 @@ class TaskStore:
             history: list[TaskRunRecord] = []
             changed = False
             for run in current.run_history:
-                if run.run_id != run_id or run.state not in {
-                    TaskRunState.READY,
-                    TaskRunState.RETRY_PENDING,
-                }:
+                if (
+                    run.run_id != run_id
+                    or run.state not in {TaskRunState.READY, TaskRunState.RETRY_PENDING}
+                    or run.claim_owner != owner_token
+                ):
                     history.append(run)
                     continue
                 changed = run.state is not TaskRunState.RETRY_PENDING or (
@@ -350,6 +491,8 @@ class TaskStore:
                         update={
                             "state": TaskRunState.RETRY_PENDING,
                             "error": bounded_error,
+                            "claim_owner": None,
+                            "claim_expires_at": None,
                         }
                     )
                 )
@@ -463,6 +606,13 @@ class TaskStore:
         self._ensure_safe_parent()
         temporary: Path | None = None
         try:
+            data = cast(
+                dict[str, object],
+                _toml_ready(document.model_dump(mode="python", exclude_none=True)),
+            )
+            serialized = tomli_w.dumps(data).encode("utf-8")
+            if len(serialized) > MAX_TASK_CENTER_FILE_BYTES:
+                raise TaskStoreWriteError("Task Center file exceeds the size limit")
             with tempfile.NamedTemporaryFile(
                 mode="wb",
                 dir=self.path.parent,
@@ -471,11 +621,7 @@ class TaskStore:
                 delete=False,
             ) as handle:
                 temporary = Path(handle.name)
-                data = cast(
-                    dict[str, object],
-                    _toml_ready(document.model_dump(mode="python", exclude_none=True)),
-                )
-                tomli_w.dump(data, handle)
+                handle.write(serialized)
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary, self.path)
@@ -556,6 +702,13 @@ class TaskStore:
         return task
 
     @staticmethod
+    def _find_run(task: TaskDefinition, run_id: str) -> TaskRunRecord:
+        run = next((item for item in task.run_history if item.run_id == run_id), None)
+        if run is None:
+            raise TaskConflictError(f"Unknown task run: {run_id}")
+        return run
+
+    @staticmethod
     def _replace_task(
         document: TaskCenterDocument, updated: TaskDefinition
     ) -> TaskCenterDocument:
@@ -597,3 +750,28 @@ def _task_state(run_state: TaskRunState) -> TaskState:
         TaskRunState.COMPLETED: TaskState.COMPLETED,
         TaskRunState.FAILED: TaskState.FAILED,
     }[run_state]
+
+
+def _prune_trigger_index(
+    receipts: tuple[TaskTriggerReceipt, ...], *, now: datetime
+) -> tuple[TaskTriggerReceipt, ...]:
+    cutoff = now - timedelta(days=TASK_TRIGGER_RETENTION_DAYS)
+    retained = tuple(receipt for receipt in receipts if receipt.recorded_at >= cutoff)
+    return retained[-MAX_TASK_TRIGGER_INDEX:]
+
+
+def _validate_claim_window(claimed_at: datetime, claim_expires_at: datetime) -> None:
+    if (
+        claimed_at.tzinfo is None
+        or claimed_at.utcoffset() is None
+        or claim_expires_at.tzinfo is None
+        or claim_expires_at.utcoffset() is None
+    ):
+        raise ValueError("claim timestamps must include a UTC offset")
+    if claim_expires_at <= claimed_at:
+        raise ValueError("claim expiry must follow claim time")
+
+
+def _validate_owner_token(owner_token: str) -> None:
+    if not owner_token.strip() or len(owner_token) > MAX_TASK_CLAIM_OWNER_LENGTH:
+        raise ValueError("claim owner token must be 1 to 200 nonblank characters")

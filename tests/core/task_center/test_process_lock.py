@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 import os
 from pathlib import Path
 import subprocess
@@ -11,7 +12,10 @@ import pytest
 
 from vibe.core.task_center import (
     TaskCreate,
+    TaskRunRecord,
+    TaskRunState,
     TaskStore,
+    TaskTriggerKind,
     _process_lock as process_lock_module,
 )
 
@@ -42,6 +46,52 @@ async def main() -> None:
 
 asyncio.run(main())
 """
+SCHEDULER_WORKER = """
+import asyncio
+import os
+from pathlib import Path
+import sys
+
+from vibe.core.task_center import (
+    TaskExecutionDisposition,
+    TaskExecutionResult,
+    TaskScheduler,
+    TaskStore,
+)
+
+path = Path(sys.argv[1])
+ready = Path(sys.argv[2])
+release = Path(sys.argv[3])
+executed = Path(sys.argv[4])
+duplicate = Path(sys.argv[5])
+
+class Port:
+    def is_profile_available(self, profile: str) -> bool:
+        del profile
+        return True
+
+    async def handoff(self, request):
+        try:
+            fd = os.open(executed, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            duplicate.touch()
+        else:
+            with os.fdopen(fd, "w") as handle:
+                handle.write(request.run_id)
+        return TaskExecutionResult(
+            disposition=TaskExecutionDisposition.QUEUED_FOR_APPROVAL
+        )
+
+async def main() -> None:
+    ready.touch()
+    while not release.exists():
+        await asyncio.sleep(0.01)
+    scheduler = TaskScheduler(TaskStore(path), execution_port=Port())
+    await scheduler.start()
+    await scheduler.stop()
+
+asyncio.run(main())
+"""
 
 
 def _worker(
@@ -59,6 +109,30 @@ def _worker(
             str(started),
             str(entered),
             str(release) if release is not None else "-",
+        ],
+        cwd=REPOSITORY_ROOT,
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
+def _scheduler_worker(
+    path: Path, ready: Path, release: Path, executed: Path, duplicate: Path
+) -> subprocess.Popen[str]:
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = str(REPOSITORY_ROOT)
+    return subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            SCHEDULER_WORKER,
+            str(path),
+            str(ready),
+            str(release),
+            str(executed),
+            str(duplicate),
         ],
         cwd=REPOSITORY_ROOT,
         env=environment,
@@ -180,3 +254,34 @@ async def test_waiting_for_process_lock_does_not_block_event_loop(tmp_path) -> N
     _assert_success(holder)
 
     assert len(await TaskStore(path).load()) == 2
+
+
+@pytest.mark.asyncio
+async def test_two_scheduler_processes_execute_one_recovered_run(tmp_path) -> None:
+    path = tmp_path / ".vibe" / "tasks.toml"
+    store = TaskStore(path, id_factory=lambda: f"task_{1:032x}")
+    task = await store.create(TaskCreate(title="Pending"))
+    run = TaskRunRecord(
+        run_id=f"run_{1:032x}",
+        trigger_instance_id="pending",
+        trigger_kind=TaskTriggerKind.MANUAL,
+        state=TaskRunState.READY,
+        triggered_at=datetime.now(UTC),
+    )
+    await store.record_trigger(task.task_id, run, next_run_at=None)
+    release = tmp_path / "release"
+    executed = tmp_path / "executed"
+    duplicate = tmp_path / "duplicate"
+    first_ready = tmp_path / "first-ready"
+    second_ready = tmp_path / "second-ready"
+    first = _scheduler_worker(path, first_ready, release, executed, duplicate)
+    second = _scheduler_worker(path, second_ready, release, executed, duplicate)
+    _wait_for(first_ready)
+    _wait_for(second_ready)
+
+    release.touch()
+    _assert_success(first)
+    _assert_success(second)
+
+    assert executed.exists()
+    assert not duplicate.exists()
