@@ -24,7 +24,6 @@ from vibe.core.agents.events import (
     _reset_managed_agent_callback_context,
     _set_managed_agent_callback_context,
 )
-from vibe.core.agents.management_port import ManagedAgentLifecycleListener
 from vibe.core.agents.models import (
     AgentType,
     BuiltinAgentName,
@@ -33,7 +32,7 @@ from vibe.core.agents.models import (
 )
 from vibe.core.config import AnyVibeConfig, SessionLoggingConfig
 from vibe.core.config.orchestrator_legacy import LegacyConfigOrchestrator
-from vibe.core.types import AssistantEvent, ToolCallEvent
+from vibe.core.types import AssistantEvent, LLMUsage, ToolCallEvent
 
 if TYPE_CHECKING:
     from vibe.core.agents.manager import AgentManager
@@ -68,7 +67,9 @@ class ManagedAgentStats(Protocol):
     session_prompt_tokens: int
     session_completion_tokens: int
     context_tokens: int
-    session_cost: float
+
+    @property
+    def session_cost(self) -> float: ...
 
 
 class ManagedAgentLoop(Protocol):
@@ -150,19 +151,11 @@ class AgentSupervisor:
         self._launch_context = launch_context
         self._hook_config_result = hook_config_result
         self._loop_factory = loop_factory or self._create_loop
-        self._lifecycle_listener: ManagedAgentLifecycleListener | None = None
         self._agents: dict[str, _ManagedAgent] = {}
         self._stopped_ids: deque[str] = deque()
-        self._subscribers: set[
-            asyncio.Queue[ManagedAgentLifecycleEvent | None]
-        ] = set()
+        self._subscribers: set[asyncio.Queue[ManagedAgentLifecycleEvent | None]] = set()
         self._next_agent_sequence = 1
         self._closed = False
-
-    def set_lifecycle_listener(
-        self, listener: ManagedAgentLifecycleListener | None
-    ) -> None:
-        self._lifecycle_listener = listener
 
     async def start(
         self, profile: str, task: str, *, name: str | None = None
@@ -336,10 +329,7 @@ class AgentSupervisor:
                                 ),
                             )
                 self._transition(
-                    agent,
-                    ManagedAgentState.IDLE,
-                    current_activity=None,
-                    error=None,
+                    agent, ManagedAgentState.IDLE, current_activity=None, error=None
                 )
             except asyncio.CancelledError:
                 self._transition(
@@ -352,8 +342,7 @@ class AgentSupervisor:
                     ManagedAgentState.FAILED,
                     current_activity=None,
                     error=self._bounded(
-                        str(exc) or type(exc).__name__,
-                        MAX_MANAGED_AGENT_ERROR_CHARS,
+                        str(exc) or type(exc).__name__, MAX_MANAGED_AGENT_ERROR_CHARS
                     ),
                 )
             finally:
@@ -388,10 +377,7 @@ class AgentSupervisor:
                 )
                 try:
                     return await callback(
-                        tool_name,
-                        callback_args,
-                        tool_call_id,
-                        required_permissions,
+                        tool_name, callback_args, tool_call_id, required_permissions
                     )
                 finally:
                     _reset_managed_agent_callback_context(token)
@@ -403,7 +389,9 @@ class AgentSupervisor:
 
         if self._user_input_callback_getter() is not None:
 
-            async def tracked_user_input_callback(callback_args: BaseModel) -> BaseModel:
+            async def tracked_user_input_callback(
+                callback_args: BaseModel,
+            ) -> BaseModel:
                 callback = self._user_input_callback_getter()
                 if callback is None:
                     raise RuntimeError("User input callback is no longer available")
@@ -450,9 +438,6 @@ class AgentSupervisor:
     def _emit(self, agent: _ManagedAgent) -> None:
         agent.updated_at = time.time()
         event = self._event(agent, advance=True)
-        if self._lifecycle_listener is not None:
-            with suppress(Exception):
-                self._lifecycle_listener(event)
         for queue in tuple(self._subscribers):
             self._offer(queue, event)
 
@@ -468,9 +453,16 @@ class AgentSupervisor:
             agent_display_name=agent.profile_display_name,
             parent_session_id=agent.parent_session_id,
             child_session_id=agent.loop.session_id,
+            task=agent.task,
             state=agent.state,
             current_activity=agent.current_activity,
             queued_messages=agent.queue.qsize(),
+            error=agent.error,
+            last_response=agent.last_response,
+            usage=LLMUsage(
+                prompt_tokens=agent.loop.stats.session_prompt_tokens,
+                completion_tokens=agent.loop.stats.session_completion_tokens,
+            ),
         )
 
     @staticmethod
@@ -484,10 +476,7 @@ class AgentSupervisor:
         queue.put_nowait(event)
 
     def _create_loop(
-        self,
-        profile: str,
-        agent_type: AgentType,
-        session_logging: SessionLoggingConfig,
+        self, profile: str, agent_type: AgentType, session_logging: SessionLoggingConfig
     ) -> ManagedAgentLoop:
         from vibe.core.agent_loop import AgentLoop
 
@@ -523,9 +512,9 @@ class AgentSupervisor:
         )
 
     def _next_id(self, requested: str) -> str:
-        base = (
-            re.sub(r"[^a-z0-9]+", "-", requested.lower()).strip("-") or "agent"
-        )[: MAX_MANAGED_AGENT_ID_CHARS - 12]
+        base = (re.sub(r"[^a-z0-9]+", "-", requested.lower()).strip("-") or "agent")[
+            : MAX_MANAGED_AGENT_ID_CHARS - 12
+        ]
         sequence = self._next_agent_sequence
         self._next_agent_sequence += 1
         return f"{base}-{sequence}"

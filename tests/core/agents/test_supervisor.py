@@ -60,8 +60,7 @@ class FakeStats:
 
 class FakeManagedLoop:
     def __init__(
-        self,
-        act: Callable[[str], AsyncGenerator[BaseEvent, None]] | None = None,
+        self, act: Callable[[str], AsyncGenerator[BaseEvent, None]] | None = None
     ) -> None:
         self.session_id = "child-session"
         self.parent_session_id: str | None = None
@@ -154,7 +153,6 @@ async def subscribed_events(
 @pytest.mark.asyncio
 async def test_supervisor_streams_persistent_agent_lifecycle_and_output() -> None:
     loops: list[FakeManagedLoop] = []
-    listener_events: list[ManagedAgentLifecycleEvent] = []
 
     def factory(
         profile: str, agent_type: AgentType, logging: SessionLoggingConfig
@@ -164,7 +162,6 @@ async def test_supervisor_streams_persistent_agent_lifecycle_and_output() -> Non
         return loop
 
     supervisor = make_supervisor(factory=factory)
-    supervisor.set_lifecycle_listener(listener_events.append)
     events, first = await subscribed_events(supervisor)
 
     started = await supervisor.start("default", "first task", name="Worker One")
@@ -188,12 +185,14 @@ async def test_supervisor_streams_persistent_agent_lifecycle_and_output() -> Non
         "agent_display_name",
         "parent_session_id",
         "child_session_id",
+        "task",
         "state",
         "current_activity",
         "queued_messages",
+        "error",
+        "last_response",
+        "usage",
     }
-    assert listener_events
-    assert listener_events[-1].sequence >= listener_events[0].sequence
 
     await supervisor.stop(started.agent_id)
     stopped = await next_event(events, ManagedAgentState.STOPPED)
@@ -232,12 +231,12 @@ async def test_supervisor_reports_tool_approval_and_question_attention() -> None
 
     async def act(_prompt: str) -> AsyncGenerator[BaseEvent, None]:
         yield ToolCallEvent(
-            tool_call_id="tool-call",
-            tool_name="write_file",
-            tool_class=Task,
+            tool_call_id="tool-call", tool_name="write_file", tool_class=Task
         )
         assert loop.approval_callback is not None
-        await loop.approval_callback("write_file", BaseModel(), "approval", None)
+        await loop.approval_callback(
+            "write_file", QuestionArgs(question="approve?"), "approval", None
+        )
         assert loop.user_input_callback is not None
         await loop.user_input_callback(QuestionArgs(question="continue?"))
         yield AssistantEvent(content="done")
@@ -258,12 +257,12 @@ async def test_supervisor_reports_tool_approval_and_question_attention() -> None
     started = await supervisor.start("default", "work")
     await first
 
-    await approval_entered.wait()
+    await asyncio.wait_for(approval_entered.wait(), timeout=2)
     assert supervisor.output(started.agent_id).state is ManagedAgentState.ATTENTION
     approval = await next_event(events, ManagedAgentState.ATTENTION)
     assert approval.current_activity == "Approval needed for write_file"
     approval_release.set()
-    await question_entered.wait()
+    await asyncio.wait_for(question_entered.wait(), timeout=2)
     question = await next_event(events, ManagedAgentState.ATTENTION)
     assert question.current_activity == "Waiting for user input"
     question_release.set()
@@ -345,9 +344,7 @@ async def test_session_change_stops_workers_and_clears_old_registry() -> None:
 async def test_supervisor_runs_real_agent_loop_workflow() -> None:
     config = build_test_vibe_config()
 
-    def factory(
-        profile: str, agent_type: AgentType, logging: SessionLoggingConfig
-    ):
+    def factory(profile: str, agent_type: AgentType, logging: SessionLoggingConfig):
         child_config = config.model_copy(deep=True)
         child_config.session_logging = logging
         return build_test_agent_loop(

@@ -23,10 +23,7 @@ from pydantic import BaseModel, ValidationError
 
 from vibe.core.agent_loop_hooks import AgentLoopHooksMixin
 from vibe.core.agents.events import ManagedAgentLifecycleEvent
-from vibe.core.agents.management_port import (
-    AgentManagementPort,
-    ManagedAgentLifecycleListener,
-)
+from vibe.core.agents.management_port import AgentManagementPort
 from vibe.core.agents.manager import AgentManager
 from vibe.core.agents.models import AgentProfile, BuiltinAgentName
 from vibe.core.agents.supervisor import AgentSupervisor
@@ -490,9 +487,6 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self.session_logger = SessionLogger(config.session_logging, self.session_id)
         self._hook_config_result = hook_config_result
         self._agent_supervisor: AgentSupervisor | None = None
-        self._managed_agent_lifecycle_listener: (
-            ManagedAgentLifecycleListener | None
-        ) = None
         self._hooks_manager = (
             HooksManager(hook_config_result.hooks) if hook_config_result else None
         )
@@ -665,16 +659,6 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
     def set_cli_control_port(self, port: CLIControlPort | None) -> None:
         self.cli_control = port
 
-    def set_cli_control(self, control: CLIControlPort | None) -> None:
-        self.set_cli_control_port(control)
-
-    def set_managed_agent_lifecycle_listener(
-        self, listener: ManagedAgentLifecycleListener | None
-    ) -> None:
-        self._managed_agent_lifecycle_listener = listener
-        if self._agent_supervisor is not None:
-            self._agent_supervisor.set_lifecycle_listener(listener)
-
     def enable_interactive_surface_capabilities(self) -> None:
         if self._interactive_surface_capabilities_enabled:
             return
@@ -689,7 +673,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         if not self.config.enable_agent_management:
             raise RuntimeError("Agent management is not enabled")
         if self._agent_supervisor is None:
-            supervisor = AgentSupervisor(
+            self._agent_supervisor = AgentSupervisor(
                 base_config_getter=lambda: self.base_config,
                 agent_manager=self.agent_manager,
                 permission_store=self._permission_store,
@@ -700,10 +684,6 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 launch_context=self.launch_context,
                 hook_config_result=self._hook_config_result,
             )
-            supervisor.set_lifecycle_listener(
-                self._managed_agent_lifecycle_listener
-            )
-            self._agent_supervisor = supervisor
         return self._agent_supervisor
 
     async def managed_agent_events(
