@@ -29,7 +29,7 @@ from textual.screen import Screen
 from textual.theme import BUILTIN_THEMES
 from textual.timer import Timer
 from textual.widget import Widget
-from textual.widgets import ContentSwitcher, Static
+from textual.widgets import ContentSwitcher, Input, Static
 from textual.worker import Worker, WorkerFailed, WorkerState
 
 from vibe import __version__ as CORE_VERSION
@@ -1778,6 +1778,8 @@ class VibeApp(App):  # noqa: PLR0904
             self.exit()
             return
         if self._workspace_view is WorkspaceView.CHAT:
+            return
+        if isinstance(self.focused, Input):
             return
         if event.character is None or event.character not in "12345":
             return

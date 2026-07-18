@@ -202,7 +202,7 @@ async def test_rail_arrow_enter_message_switches_content_and_focus() -> None:
         assert isinstance(app.focused, ChatTextArea)
         await pilot.press(*list("visible text"))
         assert app.focused.text == "visible text"
-        assert app.focused.styles.color.ansi == 7
+        assert app.focused.styles.color.hex == "#E0E0E0"
 
 
 @pytest.mark.asyncio
@@ -244,12 +244,13 @@ async def test_home_keyboard_flow_cycles_agents_opens_composer_and_returns_to_ra
         assert app.focused.activity.activity_id == second.activity_id
         assert home._inspected_id == second.activity_id
 
-        await pilot.press("up", "enter")
+        await pilot.press("up", "m")
         command = home.query_one("#office-agent-command", Input)
         assert app.focused is command
-        await pilot.press(*list("message agent"))
-        assert command.value == "message agent"
-        assert command.styles.color.ansi == 7
+        await pilot.press(*list("essage agent 12345"))
+        assert command.value == "message agent 12345"
+        assert app._workspace_view is WorkspaceView.HOME
+        assert command.styles.color.hex == "#E0E0E0"
 
         await pilot.press("escape")
         assert app.focused is navigation
