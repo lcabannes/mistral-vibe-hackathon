@@ -253,6 +253,38 @@ Trusted folders are remembered for future sessions. You can manage trusted folde
 
 This safety feature helps prevent accidental execution in sensitive directories.
 
+### Team Workspaces
+
+Vibe can share privacy-bounded coworker presence, agent state, and optional
+conversation history through a repository-scoped Git workspace. Join once from
+the source checkout:
+
+```bash
+vibe team join <team-repo-url>
+```
+
+The command verifies the transport and writes `.vibe/team.toml`. Commit that
+file with the project so trusted clones join the same workspace automatically
+on launch. A team URL of `origin` reuses the source repository's `origin`, but
+team state is materialized in a separate cache checkout and pushed only to the
+`vibe-team-demo` branch; the source checkout and its active branch are not
+modified.
+
+Generic joins share status and conversation markers, not message text. Use
+`--history messages` only when the team explicitly wants bounded message
+history, or `--history status` to disable conversation entries. The history
+limit defaults to 50 and is bounded to 1-200. Set `privacy_mode = "summaries"`
+under `[team_workspace]` in Vibe configuration to enable fixed coarse activity
+summaries; the default is status only. Prompts, reasoning, tool inputs and
+outputs, commands, environment values, approvals, and response text are never
+included in agent activity events.
+
+Do not commit a team repository URL containing credentials. Access is governed
+by the Git remote, so only teammates who should see the selected history scope
+should have access. The **Coworkers** workspace shows live members and their
+agents; the `team_activity` tool exposes the same sanitized state to local
+agents.
+
 ### Programmatic Mode
 
 You can run Vibe non-interactively by piping input or using the `--prompt` flag. This is useful for scripting.

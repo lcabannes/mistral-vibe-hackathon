@@ -60,8 +60,7 @@ class FakeStats:
 
 class FakeManagedLoop:
     def __init__(
-        self,
-        act: Callable[[str], AsyncGenerator[BaseEvent, None]] | None = None,
+        self, act: Callable[[str], AsyncGenerator[BaseEvent, None]] | None = None
     ) -> None:
         self.session_id = "child-session"
         self.parent_session_id: str | None = None
@@ -232,12 +231,12 @@ async def test_supervisor_reports_tool_approval_and_question_attention() -> None
 
     async def act(_prompt: str) -> AsyncGenerator[BaseEvent, None]:
         yield ToolCallEvent(
-            tool_call_id="tool-call",
-            tool_name="write_file",
-            tool_class=Task,
+            tool_call_id="tool-call", tool_name="write_file", tool_class=Task
         )
         assert loop.approval_callback is not None
-        await loop.approval_callback("write_file", BaseModel(), "approval", None)
+        await loop.approval_callback(
+            "write_file", QuestionArgs(question="approve?"), "approval", None
+        )
         assert loop.user_input_callback is not None
         await loop.user_input_callback(QuestionArgs(question="continue?"))
         yield AssistantEvent(content="done")
@@ -258,12 +257,12 @@ async def test_supervisor_reports_tool_approval_and_question_attention() -> None
     started = await supervisor.start("default", "work")
     await first
 
-    await approval_entered.wait()
+    await asyncio.wait_for(approval_entered.wait(), timeout=2)
     assert supervisor.output(started.agent_id).state is ManagedAgentState.ATTENTION
     approval = await next_event(events, ManagedAgentState.ATTENTION)
     assert approval.current_activity == "Approval needed for write_file"
     approval_release.set()
-    await question_entered.wait()
+    await asyncio.wait_for(question_entered.wait(), timeout=2)
     question = await next_event(events, ManagedAgentState.ATTENTION)
     assert question.current_activity == "Waiting for user input"
     question_release.set()
@@ -281,6 +280,7 @@ async def test_supervisor_reports_tool_approval_and_question_attention() -> None
 @pytest.mark.asyncio
 async def test_supervisor_bounds_prompts_queue_output_and_error() -> None:
     release = asyncio.Event()
+    fail = asyncio.Event()
     calls = 0
 
     async def act(prompt: str) -> AsyncGenerator[BaseEvent, None]:
@@ -290,6 +290,7 @@ async def test_supervisor_bounds_prompts_queue_output_and_error() -> None:
             await release.wait()
             yield AssistantEvent(content="x" * (MAX_MANAGED_AGENT_RESPONSE_CHARS + 25))
             return
+        await fail.wait()
         raise RuntimeError("failure " + "y" * 3_000)
         yield
 
@@ -300,17 +301,23 @@ async def test_supervisor_bounds_prompts_queue_output_and_error() -> None:
     started = await supervisor.start("default", task)
     await first
     await next_event(events, ManagedAgentState.RUNNING)
+    assert len(loop.prompts[0]) == MAX_MANAGED_AGENT_TASK_CHARS
+
+    release.set()
+    await next_event(events, ManagedAgentState.IDLE)
+    assert len(supervisor.output(started.agent_id).last_response) == (
+        MAX_MANAGED_AGENT_RESPONSE_CHARS
+    )
+
+    await supervisor.message(started.agent_id, "fail next")
+    await next_event(events, ManagedAgentState.RUNNING)
     for index in range(20):
         await supervisor.message(started.agent_id, f"queued {index}")
     with pytest.raises(ValueError, match="too many queued messages"):
         await supervisor.message(started.agent_id, "overflow")
-    assert len(loop.prompts[0]) == MAX_MANAGED_AGENT_TASK_CHARS
-
-    release.set()
-    idle = await next_event(events, ManagedAgentState.IDLE)
-    assert len(idle.last_response) == MAX_MANAGED_AGENT_RESPONSE_CHARS
-    failed = await next_event(events, ManagedAgentState.FAILED)
-    assert len(failed.error or "") == 2_000
+    fail.set()
+    await next_event(events, ManagedAgentState.FAILED)
+    assert len(supervisor.output(started.agent_id).error or "") == 2_000
     await supervisor.aclose()
     await events.aclose()
 
@@ -345,9 +352,7 @@ async def test_session_change_stops_workers_and_clears_old_registry() -> None:
 async def test_supervisor_runs_real_agent_loop_workflow() -> None:
     config = build_test_vibe_config()
 
-    def factory(
-        profile: str, agent_type: AgentType, logging: SessionLoggingConfig
-    ):
+    def factory(profile: str, agent_type: AgentType, logging: SessionLoggingConfig):
         child_config = config.model_copy(deep=True)
         child_config.session_logging = logging
         return build_test_agent_loop(

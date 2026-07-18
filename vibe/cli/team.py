@@ -39,10 +39,9 @@ async def _join(args: argparse.Namespace, cwd: Path) -> tuple[bool, str]:
         team_repository_url=metadata.team_repo_url,
         team_branch=metadata.branch,
         cache_root=VIBE_HOME.path / "team-workspaces",
-        privacy_mode=PrivacyMode(args.privacy_mode),
+        privacy_mode=PrivacyMode.STATUS,
         history_scope=HistoryScope(metadata.history_scope),
         history_limit=metadata.history_limit,
-        member_name=args.member_name,
     )
     try:
         snapshot = await service.start()

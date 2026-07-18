@@ -192,20 +192,8 @@ def _parse_team_arguments(argv: list[str]) -> argparse.Namespace:
         help="Conversation data shared with teammates (default: markers)",
     )
     join.add_argument(
-        "--history-limit",
-        type=int,
-        choices=range(1, 201),
-        default=50,
-        metavar="N",
+        "--history-limit", type=int, choices=range(1, 201), default=50, metavar="N"
     )
-    join.add_argument(
-        "--activity",
-        choices=["status", "summaries"],
-        default="status",
-        dest="privacy_mode",
-        help="Agent activity detail shared with teammates (default: status)",
-    )
-    join.add_argument("--member-name", default="")
     join.add_argument("--workdir", type=Path, metavar="DIR")
     join.add_argument(
         "--trust",
