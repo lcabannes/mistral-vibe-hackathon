@@ -38,8 +38,15 @@ from vibe.core.agents.models import BuiltinAgentName, ManagedAgentState
 from vibe.core.config import VibeConfig, resolve_api_key
 from vibe.core.config.harness_files import init_harness_files_manager
 from vibe.core.config.orchestrator_legacy import LegacyConfigOrchestrator
+from vibe.core.logger import logger
 from vibe.core.tools.manager import ToolManager
 from vibe.core.utils.platform import is_windows
+from vibe.core.voice_control import (
+    VoiceControlRunner,
+    VoicePhase,
+    answer_from_speech,
+    spoken_question_prompt,
+)
 from vibe.core.worktree import PreparedWorktree, WorktreeError, prepare_worktree_session
 
 WORKER_PATH = Path(__file__).with_name("worker.py")
@@ -201,6 +208,115 @@ class AgentWorker:
         self.store.observe_worker_exit(self, return_code)
 
 
+_VOICE_GUIDANCE = (
+    "You are now being controlled hands-free by voice. Keep every reply to one or "
+    "two short spoken sentences: no code blocks, no lists, and do not read file "
+    "paths aloud. Confirm actions briefly, for example 'Started a build agent for "
+    "the login page.' When you need information, ask one short question at a time. "
+    "Keep every worker in one of the build, research, or review groups."
+)
+
+
+class AudioControlController:
+    """Bridges the hands-free voice runner to the orchestrator agent."""
+
+    def __init__(self, store: AgentRoomStore) -> None:
+        self._store = store
+        self._runner: VoiceControlRunner | None = None
+        self._lock = RLock()
+        self._error: str | None = None
+
+    def state(self) -> dict[str, Any]:
+        runner = self._runner
+        running = runner is not None and runner.is_running
+        phase = runner.phase.value if runner is not None else VoicePhase.OFF.value
+        return {
+            "enabled": running,
+            "phase": phase,
+            "last_heard": runner.last_heard if runner is not None else "",
+            "last_spoken": runner.last_spoken if runner is not None else "",
+            "error": self._error,
+        }
+
+    def start(self) -> dict[str, Any]:
+        with self._lock:
+            if self._runner is not None and self._runner.is_running:
+                return self.state()
+            self._error = None
+            runner = VoiceControlRunner(
+                config_getter=VibeConfig.load, command_handler=self._on_command
+            )
+            try:
+                runner.start()
+            except Exception as error:
+                self._error = safe_error(error)
+                raise ValueError(
+                    f"Could not start audio control: {self._error}"
+                ) from error
+            self._runner = runner
+        self._store.inject_orchestrator_context(_VOICE_GUIDANCE)
+        return self.state()
+
+    def stop(self) -> dict[str, Any]:
+        with self._lock:
+            runner = self._runner
+            self._runner = None
+        if runner is not None:
+            runner.stop()
+        return self.state()
+
+    def shutdown(self) -> None:
+        with suppress_errors():
+            self.stop()
+
+    def _on_command(self, text: str) -> None:
+        try:
+            self._store.send_message(
+                ORCHESTRATOR_ID,
+                {"content": text, "client_message_id": f"voice-{uuid4().hex}"},
+                interpret_commands=False,
+            )
+        except Exception:
+            logger.error("Voice command dispatch failed", exc_info=True)
+
+    def notify_assistant(self, text: str) -> None:
+        runner = self._runner
+        if runner is not None and runner.is_running:
+            runner.speak(text)
+
+    def notify_question(
+        self, question_id: str, questions: list[dict[str, Any]]
+    ) -> None:
+        runner = self._runner
+        if runner is None or not runner.is_running or not questions:
+            return
+        Thread(
+            target=self._answer_question,
+            args=(question_id, questions),
+            name="voice-question",
+            daemon=True,
+        ).start()
+
+    def _answer_question(
+        self, question_id: str, questions: list[dict[str, Any]]
+    ) -> None:
+        runner = self._runner
+        if runner is None:
+            return
+        answers: list[dict[str, Any]] = []
+        for question in questions:
+            spoken = runner.ask(spoken_question_prompt(question))
+            if spoken is None:
+                return
+            answers.append(answer_from_speech(question, spoken))
+        try:
+            self._store.answer_question(
+                ORCHESTRATOR_ID, question_id, {"answers": answers}
+            )
+        except Exception:
+            logger.error("Voice question answer failed", exc_info=True)
+
+
 class AgentRoomStore:
     def __init__(self, workdir: Path, *, network_mode: str = "auto") -> None:
         self._workdir = workdir
@@ -219,6 +335,7 @@ class AgentRoomStore:
         self._integration_branch = git_output(
             self._workdir, "branch", "--show-current"
         ).strip()
+        self._audio = AudioControlController(self)
         self._mark_interrupted_runs()
         self._launch_orchestrator()
 
@@ -240,6 +357,7 @@ class AgentRoomStore:
                 "tools": deepcopy(self._tools),
                 "coordination": self._coordination_locked(),
                 "network": deepcopy(self._network),
+                "audio": self._audio.state(),
             }
 
     def create(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -270,6 +388,20 @@ class AgentRoomStore:
             auto_approve=auto_approve,
         )
         return self._public_run(run)
+
+    def start_audio(self) -> dict[str, Any]:
+        return self._audio.start()
+
+    def stop_audio(self) -> dict[str, Any]:
+        return self._audio.stop()
+
+    def inject_orchestrator_context(self, text: str) -> None:
+        with self._lock:
+            worker = self._workers.get(ORCHESTRATOR_ID)
+        if worker is None or not worker.ready.is_set():
+            return
+        with suppress_errors():
+            worker.send({"type": "inject_context", "content": text})
 
     def send_message(
         self, run_id: str, payload: dict[str, Any], *, interpret_commands: bool = True
@@ -525,6 +657,8 @@ class AgentRoomStore:
             if run is None:
                 return
             now = time.time()
+            assistant_text: str | None = None
+            question_notice: tuple[str, list[dict[str, Any]]] | None = None
             if event_type == "ready":
                 run.update({
                     "child_session_id": payload.get("session_id"),
@@ -563,6 +697,8 @@ class AgentRoomStore:
                         self._message("assistant", content, None, "succeeded")
                     )
                     self._trim_conversation(run)
+                    if worker.run_id == ORCHESTRATOR_ID:
+                        assistant_text = content
             elif event_type == "tool_started":
                 tool_name = str(payload.get("tool_name") or "tool")
                 run["state"] = "working"
@@ -604,6 +740,9 @@ class AgentRoomStore:
                 run["state"] = "attention"
                 run["current_activity"] = "Waiting for your answer"
                 self._append_event(run, "question", "Agent asked a question")
+                request_id = str(payload.get("request_id") or "")
+                if worker.run_id == ORCHESTRATOR_ID and request_id:
+                    question_notice = (request_id, question["questions"])
             elif event_type == "usage":
                 run.update({
                     "turns_used": payload.get("turns_used", 0),
@@ -630,6 +769,11 @@ class AgentRoomStore:
             self._persist_locked()
         if event_type in {"ready", "state", "usage"}:
             self._broadcast_management_snapshot()
+        if worker.run_id == ORCHESTRATOR_ID:
+            if assistant_text:
+                self._audio.notify_assistant(assistant_text)
+            elif question_notice is not None:
+                self._audio.notify_question(question_notice[0], question_notice[1])
 
     def observe_worker_log(self, run_id: str, line: str) -> None:
         if not line:
@@ -671,6 +815,7 @@ class AgentRoomStore:
         self._broadcast_management_snapshot()
 
     def close(self) -> None:
+        self._audio.shutdown()
         with self._lock:
             workers = tuple(self._workers.values())
             self._workers.clear()
@@ -1727,6 +1872,19 @@ class AgentRoomHandler(SimpleHTTPRequestHandler):
             return
         super().do_HEAD()
 
+    def _handle_collection_post(self, path: str, payload: dict[str, Any]) -> bool:
+        store = self.server.store
+        if path == "/api/agent-runs":
+            self._send_json(store.create(payload), HTTPStatus.ACCEPTED)
+            return True
+        if path == "/api/audio/start":
+            self._send_json(store.start_audio(), HTTPStatus.ACCEPTED)
+            return True
+        if path == "/api/audio/stop":
+            self._send_json(store.stop_audio())
+            return True
+        return False
+
     def do_POST(self) -> None:
         if not self._is_loopback_request():
             self._send_json({"error": "Loopback access only"}, HTTPStatus.FORBIDDEN)
@@ -1734,8 +1892,7 @@ class AgentRoomHandler(SimpleHTTPRequestHandler):
         try:
             payload = self._read_json()
             path = urlparse(self.path).path
-            if path == "/api/agent-runs":
-                self._send_json(self.server.store.create(payload), HTTPStatus.ACCEPTED)
+            if self._handle_collection_post(path, payload):
                 return
             parts = path.strip("/").split("/")
             if len(parts) < RUN_ACTION_PARTS or parts[:2] != ["api", "agent-runs"]:

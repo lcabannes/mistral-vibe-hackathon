@@ -107,7 +107,41 @@ def store(tmp_path: Path) -> Any:
     ]
     instance._runs = {}
     instance._integration_branch = "codex/test-room"
+    instance._audio = room.AudioControlController(instance)
     return instance
+
+
+class FakeRunner:
+    def __init__(self, **_kwargs: Any) -> None:
+        self.started = False
+        self.stopped = False
+        self.spoken: list[str] = []
+        self.asked: list[str] = []
+        self.answer: str | None = "build"
+
+    @property
+    def is_running(self) -> bool:
+        return self.started and not self.stopped
+
+    @property
+    def phase(self) -> Any:
+        return room.VoicePhase.LISTENING if self.is_running else room.VoicePhase.OFF
+
+    last_heard = ""
+    last_spoken = ""
+
+    def start(self) -> None:
+        self.started = True
+
+    def stop(self) -> None:
+        self.stopped = True
+
+    def speak(self, text: str) -> None:
+        self.spoken.append(text)
+
+    def ask(self, prompt: str, *, timeout: float | None = None) -> str | None:
+        self.asked.append(prompt)
+        return self.answer
 
 
 def test_snapshot_exposes_revisioned_shared_backend_identity(store: Any) -> None:
@@ -120,6 +154,129 @@ def test_snapshot_exposes_revisioned_shared_backend_identity(store: Any) -> None
         "workdir": str(store._workdir),
         "integration_branch": "codex/test-room",
     }
+
+
+def test_snapshot_includes_audio_off_state(store: Any) -> None:
+    assert store.snapshot()["audio"] == {
+        "enabled": False,
+        "phase": "off",
+        "last_heard": "",
+        "last_spoken": "",
+        "error": None,
+    }
+
+
+def test_start_and_stop_audio_toggle_runner(
+    store: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(room, "VoiceControlRunner", FakeRunner)
+    orchestrator = FakeWorker(room.ORCHESTRATOR_ID)
+    store._workers[room.ORCHESTRATOR_ID] = orchestrator
+
+    started = store.start_audio()
+    assert started["enabled"] is True
+    assert started["phase"] == "listening"
+    assert store.snapshot()["audio"]["enabled"] is True
+    injected = [m for m in orchestrator.sent if m["type"] == "inject_context"]
+    assert injected and "voice" in injected[0]["content"].lower()
+
+    stopped = store.stop_audio()
+    assert stopped["enabled"] is False
+    assert store.snapshot()["audio"]["enabled"] is False
+
+
+def test_voice_command_is_sent_to_the_orchestrator(
+    store: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sent: list[tuple[str, dict[str, Any], bool]] = []
+
+    def fake_send(
+        run_id: str, payload: dict[str, Any], *, interpret_commands: bool = True
+    ) -> dict[str, Any]:
+        sent.append((run_id, payload, interpret_commands))
+        return {}
+
+    monkeypatch.setattr(store, "send_message", fake_send)
+    store._audio._on_command("spin up a research agent")
+
+    assert len(sent) == 1
+    run_id, payload, interpret = sent[0]
+    assert run_id == room.ORCHESTRATOR_ID
+    assert payload["content"] == "spin up a research agent"
+    assert interpret is False
+
+
+def test_orchestrator_reply_is_spoken(
+    store: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(room, "VoiceControlRunner", FakeRunner)
+    monkeypatch.setattr(store, "_persist_locked", lambda: None)
+    monkeypatch.setattr(store, "_refresh_worktree_status_locked", lambda _run: None)
+    orchestrator = FakeWorker(room.ORCHESTRATOR_ID)
+    store._workers[room.ORCHESTRATOR_ID] = orchestrator
+    store._runs[room.ORCHESTRATOR_ID] = make_run(room.ORCHESTRATOR_ID)
+    store.start_audio()
+
+    store.observe_worker_event(
+        orchestrator, {"type": "assistant_final", "content": "Started a build agent."}
+    )
+
+    assert store._audio._runner.spoken == ["Started a build agent."]
+
+
+def test_question_event_forwards_to_the_controller(
+    store: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    forwarded: list[tuple[str, list[dict[str, Any]]]] = []
+    monkeypatch.setattr(
+        store._audio,
+        "notify_question",
+        lambda qid, questions: forwarded.append((qid, questions)),
+    )
+    monkeypatch.setattr(store, "_persist_locked", lambda: None)
+    monkeypatch.setattr(store, "_refresh_worktree_status_locked", lambda _run: None)
+    orchestrator = FakeWorker(room.ORCHESTRATOR_ID)
+    store._workers[room.ORCHESTRATOR_ID] = orchestrator
+    store._runs[room.ORCHESTRATOR_ID] = make_run(room.ORCHESTRATOR_ID)
+
+    store.observe_worker_event(
+        orchestrator,
+        {
+            "type": "question_requested",
+            "request_id": "q-42",
+            "questions": [{"question": "Which?", "options": []}],
+        },
+    )
+
+    assert forwarded == [("q-42", [{"question": "Which?", "options": []}])]
+
+
+def test_answer_question_builds_a_voice_answer(
+    store: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: list[dict[str, Any]] = []
+
+    def fake_answer(
+        run_id: str, question_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        captured.append({"run_id": run_id, "id": question_id, **payload})
+        return {}
+
+    monkeypatch.setattr(store, "answer_question", fake_answer)
+    runner = FakeRunner()
+    runner.start()
+    runner.answer = "research"
+    store._audio._runner = runner
+
+    store._audio._answer_question(
+        "q-1", [{"question": "Which category?", "options": [{"label": "Research"}]}]
+    )
+
+    assert len(captured) == 1
+    assert captured[0]["run_id"] == room.ORCHESTRATOR_ID
+    assert captured[0]["id"] == "q-1"
+    assert captured[0]["answers"][0]["answer"] == "Research"
+    assert runner.asked
 
 
 def test_only_one_backend_can_own_a_vibe_home(

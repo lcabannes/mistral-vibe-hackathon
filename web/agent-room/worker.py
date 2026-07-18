@@ -303,6 +303,11 @@ integration branch. Your own worktree is for coordination, not implementation.
                         )
             elif message_type == "management_snapshot":
                 self.management.apply_snapshot(payload)
+            elif message_type == "inject_context":
+                text = str(payload.get("content") or "").strip()
+                if text and self.agent_loop is not None:
+                    with suppress(Exception):
+                        await self.agent_loop.inject_user_context(text)
 
     async def _prompt_worker(self) -> None:
         while True:

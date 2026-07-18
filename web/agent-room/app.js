@@ -52,6 +52,7 @@ const state = {
   tools: [],
   coordination: null,
   network: null,
+  audio: null,
   connected: false,
   bridgeSeen: false,
   selectedAgentId: null,
@@ -107,6 +108,8 @@ const elements = {
   agentDialogNotice: document.querySelector("#agent-dialog-notice"),
   agentDialogError: document.querySelector("#agent-dialog-error"),
   simulateButton: document.querySelector("#simulate-button"),
+  audioToggle: document.querySelector("#audio-toggle"),
+  audioLabel: document.querySelector("#audio-label"),
   feedStatus: document.querySelector("#feed-status"),
   officeClock: document.querySelector("#office-clock"),
   summaryRunning: document.querySelector("#summary-running"),
@@ -170,7 +173,9 @@ async function loadRoom() {
     state.network = live.network || null;
     state.agents = normalizeAgents(live.activities, groupIds, stored);
     state.lastSnapshot = JSON.stringify(live.activities);
+    state.audio = live.audio || null;
     updateNetworkStatus();
+    updateAudioStatus();
   } catch {
     state.connected = false;
     state.profiles = [];
@@ -225,6 +230,59 @@ function updateNetworkStatus() {
   );
 }
 
+const AUDIO_PHASE_LABELS = {
+  off: "Voice off",
+  listening: "Listening…",
+  awake: "Go ahead…",
+  thinking: "Working…",
+  speaking: "Speaking…",
+};
+
+function updateAudioStatus() {
+  const button = elements.audioToggle;
+  if (!button) return;
+  const audio = state.audio;
+  const enabled = Boolean(audio && audio.enabled);
+  const phase = enabled && audio.phase ? audio.phase : "off";
+  button.disabled = !state.connected;
+  button.classList.toggle("is-active", enabled);
+  button.setAttribute("aria-pressed", enabled ? "true" : "false");
+  button.dataset.phase = phase;
+  const hasError = Boolean(audio && audio.error);
+  elements.audioLabel.textContent = hasError
+    ? "Voice error"
+    : enabled
+      ? AUDIO_PHASE_LABELS[phase] || "Listening…"
+      : "Voice off";
+  button.title = hasError
+    ? audio.error
+    : enabled
+      ? "Hands-free voice control is on — click to turn off"
+      : "Turn on hands-free voice control (say “hello orchestrator”)";
+}
+
+async function toggleAudio() {
+  if (!state.connected || !elements.audioToggle) return;
+  const turnOn = !(state.audio && state.audio.enabled);
+  elements.audioToggle.disabled = true;
+  try {
+    const response = await fetch(turnOn ? "/api/audio/start" : "/api/audio/stop", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "Voice control unavailable");
+    state.audio = payload;
+  } catch (error) {
+    state.audio = { enabled: false, phase: "off", error: error.message };
+  } finally {
+    updateAudioStatus();
+    state.lastSnapshot = "";
+    await refreshLiveRuns();
+  }
+}
+
 async function refreshLiveRuns() {
   if (elements.agentDialog.open || elements.groupDialog.open) return;
   try {
@@ -237,7 +295,9 @@ async function refreshLiveRuns() {
     state.tools = Array.isArray(payload.tools) ? payload.tools : state.tools;
     state.coordination = payload.coordination || state.coordination;
     state.network = payload.network || state.network;
+    state.audio = payload.audio || null;
     updateNetworkStatus();
+    updateAudioStatus();
     const snapshot = JSON.stringify(payload.activities);
     if (snapshot === state.lastSnapshot) return;
     state.lastSnapshot = snapshot;
@@ -1714,6 +1774,8 @@ function bindEvents() {
     document.body.classList.toggle("motion-paused", state.motionPaused);
     elements.simulateButton.textContent = state.motionPaused ? "Resume motion" : "Pause motion";
   });
+
+  elements.audioToggle?.addEventListener("click", () => void toggleAudio());
 
   window.addEventListener("resize", () => {
     placeAgents();
