@@ -85,7 +85,7 @@ class AgentWorker:
         worktree: PreparedWorktree,
         session_root: Path,
         worker_environment: dict[str, str],
-        disabled_tools: tuple[str, ...] = (),
+        enabled_tools: tuple[str, ...] | None = None,
         resume_session_id: str | None = None,
         force_auto_approve: bool = False,
     ) -> None:
@@ -95,7 +95,7 @@ class AgentWorker:
         self.worktree = worktree
         self.session_root = session_root
         self.worker_environment = worker_environment
-        self.disabled_tools = disabled_tools
+        self.enabled_tools = enabled_tools
         self.resume_session_id = resume_session_id
         self.force_auto_approve = force_auto_approve
         self.ready = Event()
@@ -111,8 +111,10 @@ class AgentWorker:
             "--session-root",
             str(self.session_root),
         ]
-        for tool_name in self.disabled_tools:
-            command.extend(("--disable-tool", tool_name))
+        if self.enabled_tools is not None:
+            command.append("--restrict-tools")
+            for tool_name in self.enabled_tools:
+                command.extend(("--enable-tool", tool_name))
         if self.resume_session_id:
             command.extend(("--resume-session", self.resume_session_id))
         if self.force_auto_approve:
@@ -224,8 +226,7 @@ class AgentRoomStore:
 
     def create(self, payload: dict[str, Any]) -> dict[str, Any]:
         profile = (
-            self._optional_text(payload, "agent_name", 80)
-            or BuiltinAgentName.AUTO_APPROVE
+            self._optional_text(payload, "agent_name", 80) or BuiltinAgentName.DEFAULT
         )
         if profile == BuiltinAgentName.ORCHESTRATOR:
             raise ValueError("The room already has one orchestrator")
@@ -440,6 +441,10 @@ class AgentRoomStore:
             return deepcopy(question)
 
     def merge(self, run_id: str) -> dict[str, Any]:
+        with self._lifecycle_lock(run_id):
+            return self._merge_stopped_worker(run_id)
+
+    def _merge_stopped_worker(self, run_id: str) -> dict[str, Any]:
         with self._lock:
             run = self._get_run_locked(run_id)
             if run.get("is_orchestrator"):
@@ -483,11 +488,11 @@ class AgentRoomStore:
     def observe_worker_event(  # noqa: PLR0912, PLR0915
         self, worker: AgentWorker, payload: dict[str, Any]
     ) -> None:
-        with self._lock:
-            if self._workers.get(worker.run_id) is not worker:
-                return
         event_type = payload.get("type")
         if event_type == "remote_request":
+            with self._lock:
+                if self._workers.get(worker.run_id) is not worker:
+                    return
             Thread(
                 target=self._handle_remote_request,
                 args=(worker, payload),
@@ -496,6 +501,8 @@ class AgentRoomStore:
             ).start()
             return
         with self._lock:
+            if self._workers.get(worker.run_id) is not worker:
+                return
             run = self._runs.get(worker.run_id)
             if run is None:
                 return
@@ -657,9 +664,7 @@ class AgentRoomStore:
             existing = self._runs.get(ORCHESTRATOR_ID)
             if existing is not None:
                 existing["auto_approve"] = True
-                existing.setdefault(
-                    "enabled_tools", [item["name"] for item in self._tools]
-                )
+                existing.setdefault("enabled_tools", None)
         if existing is not None:
             self._ensure_worker(ORCHESTRATOR_ID)
         else:
@@ -743,9 +748,7 @@ class AgentRoomStore:
             "error": None,
             "resumable": True,
             "queued_messages": len(conversation),
-            "enabled_tools": enabled_tools
-            if enabled_tools is not None
-            else [item["name"] for item in self._tools],
+            "enabled_tools": enabled_tools,
             "auto_approve": auto_approve or is_orchestrator,
             "worktree_name": prepared.name,
             "worktree_path": str(prepared.path),
@@ -765,7 +768,7 @@ class AgentRoomStore:
             prepared,
             self._session_root,
             self._worker_environment,
-            disabled_tools=self._disabled_tools(enabled_tools),
+            enabled_tools=tuple(enabled_tools) if enabled_tools is not None else None,
             force_auto_approve=auto_approve or is_orchestrator,
         )
         with self._lock:
@@ -833,9 +836,9 @@ class AgentRoomStore:
                         "merge_error": None,
                     })
                 enabled_tools = run.get("enabled_tools")
-                if not isinstance(enabled_tools, list):
-                    enabled_tools = [item["name"] for item in self._tools]
-                    run["enabled_tools"] = enabled_tools
+                if enabled_tools is not None and not isinstance(enabled_tools, list):
+                    enabled_tools = None
+                    run["enabled_tools"] = None
                 worker = AgentWorker(
                     self,
                     run_id,
@@ -843,7 +846,9 @@ class AgentRoomStore:
                     prepared,
                     self._session_root,
                     self._worker_environment,
-                    disabled_tools=self._disabled_tools(enabled_tools),
+                    enabled_tools=(
+                        tuple(enabled_tools) if enabled_tools is not None else None
+                    ),
                     resume_session_id=run.get("child_session_id"),
                     force_auto_approve=bool(
                         run.get("auto_approve") or run.get("is_orchestrator")
@@ -912,6 +917,15 @@ class AgentRoomStore:
         self._append_event(run, state, label, run["error"])
 
     def _handle_remote_request(
+        self, worker: AgentWorker, payload: dict[str, Any]
+    ) -> None:
+        with self._lifecycle_lock(worker.run_id):
+            with self._lock:
+                if self._workers.get(worker.run_id) is not worker:
+                    return
+            self._handle_current_remote_request(worker, payload)
+
+    def _handle_current_remote_request(
         self, worker: AgentWorker, payload: dict[str, Any]
     ) -> None:
         request_id = str(payload.get("request_id") or "")
@@ -1255,18 +1269,18 @@ class AgentRoomStore:
             if name != "exit_plan_mode"
         ]
 
-    def _enabled_tools(self, payload: dict[str, Any]) -> list[str]:
+    def _enabled_tools(self, payload: dict[str, Any]) -> list[str] | None:
         available = {item["name"] for item in self._tools}
         raw = payload.get("enabled_tools")
         if raw is None:
-            return sorted(available)
+            return None
         if not isinstance(raw, list) or any(not isinstance(item, str) for item in raw):
             raise ValueError("enabled_tools must be a list of tool names")
         enabled = list(dict.fromkeys(item.strip() for item in raw if item.strip()))
         unknown = sorted(set(enabled) - available)
         if unknown:
             raise ValueError(f"Unknown tools: {', '.join(unknown)}")
-        return enabled
+        return None if set(enabled) == available else enabled
 
     @staticmethod
     def _validated_images(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1302,14 +1316,6 @@ class AgentRoomStore:
                 "mime_type": mime_type,
             })
         return images
-
-    def _disabled_tools(self, enabled_tools: list[str] | None) -> tuple[str, ...]:
-        if enabled_tools is None:
-            return ()
-        enabled = set(enabled_tools)
-        return tuple(
-            item["name"] for item in self._tools if item["name"] not in enabled
-        )
 
     def _coordination_locked(self) -> dict[str, Any]:
         live = [run for run in self._runs.values() if run.get("runtime_live")]

@@ -50,6 +50,7 @@ from vibe.core.types import (
 MAX_TURNS = 48
 MAX_TOKENS = 250_000
 MAX_PRICE_DOLLARS = 5.0
+NO_TOOLS_PATTERN = "__agent_room_no_tools__"
 
 
 class RemoteAgentManagement(AgentManagementPort):
@@ -125,13 +126,13 @@ class WorkerBridge:
         profile: str,
         session_root: Path,
         *,
-        disabled_tools: tuple[str, ...] = (),
+        enabled_tools: tuple[str, ...] | None = None,
         resume_session_id: str | None = None,
         auto_approve: bool = False,
     ) -> None:
         self.profile = profile
         self.session_root = session_root
-        self.disabled_tools = disabled_tools
+        self.enabled_tools = enabled_tools
         self.resume_session_id = resume_session_id
         self.auto_approve = auto_approve
         self.agent_loop: AgentLoop | None = None
@@ -147,16 +148,17 @@ class WorkerBridge:
         self.current_turn: asyncio.Task[None] | None = None
         self.shutdown_event = asyncio.Event()
 
-    async def run(self) -> None:
+    async def run(self) -> None:  # noqa: PLR0915
         config = VibeConfig.load().model_copy(deep=True)
         config.session_logging = SessionLoggingConfig(
             save_dir=str(self.session_root),
             session_prefix=f"room-{self.profile}",
             enabled=True,
         )
-        config.disabled_tools = list(
-            dict.fromkeys([*config.disabled_tools, *self.disabled_tools])
-        )
+        tool_allowlist = None
+        if self.enabled_tools is not None:
+            tool_allowlist = list(self.enabled_tools) or [NO_TOOLS_PATTERN]
+            config.enabled_tools = tool_allowlist
         agent_loop = AgentLoop(
             LegacyConfigOrchestrator(config),
             agent_name=self.profile,
@@ -175,6 +177,9 @@ class WorkerBridge:
             hook_config_result=load_hooks_from_fs(),
             force_bypass_tool_permissions=self.auto_approve,
         )
+        if tool_allowlist is not None:
+            agent_loop.agent_manager.config.enabled_tools = tool_allowlist
+        agent_loop.agent_manager.config.bypass_tool_permissions = self.auto_approve
         self.agent_loop = agent_loop
         agent_loop.set_approval_callback(self._approval_callback)
         agent_loop.set_user_input_callback(self._question_callback)
@@ -528,7 +533,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile", required=True)
     parser.add_argument("--session-root", type=Path, required=True)
-    parser.add_argument("--disable-tool", action="append", default=[])
+    parser.add_argument("--restrict-tools", action="store_true")
+    parser.add_argument("--enable-tool", action="append", default=[])
     parser.add_argument("--resume-session")
     parser.add_argument("--auto-approve", action="store_true")
     return parser.parse_args()
@@ -541,7 +547,7 @@ def main() -> None:
     bridge = WorkerBridge(
         args.profile,
         args.session_root,
-        disabled_tools=tuple(args.disable_tool),
+        enabled_tools=tuple(args.enable_tool) if args.restrict_tools else None,
         resume_session_id=args.resume_session,
         auto_approve=args.auto_approve,
     )

@@ -1293,12 +1293,16 @@ async function sendAgentMessage(agentId, rawContent) {
     );
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || `Send failed (${response.status})`);
-    state.chatAttachments.delete(agentId);
+    if (state.chatAttachments.get(agentId) === images) {
+      state.chatAttachments.delete(agentId);
+    }
     state.lastSnapshot = "";
     await refreshLiveRuns();
   } catch (error) {
     optimistic.status = "failed";
-    state.chatDrafts.set(agentId, content);
+    if (!state.chatDrafts.get(agentId)?.trim()) {
+      state.chatDrafts.set(agentId, content);
+    }
     state.chatErrors.set(agentId, error.message);
   } finally {
     state.pendingRequests.delete(agentId);
@@ -1526,7 +1530,7 @@ function openAgentDialog(groupId, origin) {
       elements.agentProfile.append(option);
     }
     const preferredProfile = state.profiles.find(
-      (profile) => profile.name === "auto-approve",
+      (profile) => profile.name === "default",
     );
     if (preferredProfile) elements.agentProfile.value = preferredProfile.name;
   }

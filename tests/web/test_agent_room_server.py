@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from threading import Event
+from threading import Event, Thread
 from types import SimpleNamespace
 from typing import Any
 
@@ -286,6 +286,7 @@ def test_message_restarts_a_stopped_agent_in_place(
     ]
     assert run["runtime_live"] is True
     assert launches[0]["resume_session_id"] == "child"
+    assert launches[0]["enabled_tools"] == ("bash", "web_search")
     assert launches[0]["force_auto_approve"] is True
     assert store._workers[run["tool_call_id"]].sent[-1]["content"] == "Continue"
 
@@ -301,10 +302,15 @@ def test_create_defaults_to_yolo_and_accepts_zero_tools(store: Any) -> None:
 
     store.create({"task": "Work", "enabled_tools": []})
 
-    assert captured["profile"] == "auto-approve"
+    assert captured["profile"] == "default"
     assert captured["enabled_tools"] == []
     assert captured["auto_approve"] is True
-    assert store._disabled_tools([]) == ("bash", "web_search")
+
+
+def test_all_selected_tools_means_unrestricted_remote_discovery(store: Any) -> None:
+    assert store._enabled_tools({}) is None
+    assert store._enabled_tools({"enabled_tools": ["bash", "web_search"]}) is None
+    assert store._enabled_tools({"enabled_tools": []}) == []
 
 
 def test_create_rejects_unknown_tools(store: Any) -> None:
@@ -420,6 +426,13 @@ def test_stale_worker_exit_cannot_stop_a_replacement(store: Any) -> None:
     assert run["runtime_live"] is True
     assert store._workers[run["tool_call_id"]] is replacement
 
+    store.observe_worker_event(
+        old_worker, {"type": "state", "state": "failed", "error": "stale failure"}
+    )
+
+    assert run["state"] == "idle"
+    assert run["error"] is None
+
 
 def test_launch_records_a_distinct_worktree(
     monkeypatch: pytest.MonkeyPatch, store: Any, tmp_path: Path
@@ -472,6 +485,52 @@ def test_merge_requires_stopped_clean_committed_worker(store: Any) -> None:
         store.merge(run["tool_call_id"])
 
 
+def test_merge_serializes_same_agent_resume(
+    monkeypatch: pytest.MonkeyPatch, store: Any, tmp_path: Path
+) -> None:
+    run = make_run()
+    worktree = tmp_path / "worker"
+    worktree.mkdir()
+    run.update({
+        "runtime_live": False,
+        "state": "stopped",
+        "worktree_path": str(worktree),
+    })
+    store._runs[run["tool_call_id"]] = run
+    validation_started = Event()
+    release_validation = Event()
+    ensure_called = Event()
+    worker = FakeWorker(run["tool_call_id"])
+
+    def validate(*_args: Any) -> dict[str, str]:
+        validation_started.set()
+        assert release_validation.wait(1)
+        return {"merge_commit": "merged", "validation_summary": "ok"}
+
+    def ensure(_run_id: str) -> FakeWorker:
+        ensure_called.set()
+        return worker
+
+    monkeypatch.setattr(store, "_validate_and_merge", validate)
+    monkeypatch.setattr(store, "_ensure_worker", ensure)
+    merge_thread = Thread(target=store.merge, args=(run["tool_call_id"],))
+    send_thread = Thread(
+        target=store.send_message, args=(run["tool_call_id"], {"content": "Continue"})
+    )
+
+    merge_thread.start()
+    assert validation_started.wait(1)
+    send_thread.start()
+    assert not ensure_called.wait(0.05)
+    release_validation.set()
+    merge_thread.join(1)
+    send_thread.join(1)
+
+    assert not merge_thread.is_alive()
+    assert not send_thread.is_alive()
+    assert ensure_called.is_set()
+
+
 def test_orchestrator_remote_start_returns_typed_snapshot(store: Any) -> None:
     orchestrator = make_run(room.ORCHESTRATOR_ID)
     orchestrator["is_orchestrator"] = True
@@ -494,6 +553,29 @@ def test_orchestrator_remote_start_returns_typed_snapshot(store: Any) -> None:
     assert response["ok"] is True
     assert response["result"]["agent_id"] == "created-worker"
     assert response["result"]["state"] == "idle"
+
+
+def test_stale_orchestrator_cannot_control_the_room(store: Any) -> None:
+    orchestrator = make_run(room.ORCHESTRATOR_ID)
+    orchestrator["is_orchestrator"] = True
+    stale = FakeWorker(room.ORCHESTRATOR_ID)
+    current = FakeWorker(room.ORCHESTRATOR_ID)
+    store._runs[room.ORCHESTRATOR_ID] = orchestrator
+    store._workers[room.ORCHESTRATOR_ID] = current
+    calls: list[dict[str, Any]] = []
+    store.create = lambda payload: calls.append(payload)
+
+    store._handle_remote_request(
+        stale,
+        {
+            "request_id": "stale-request",
+            "operation": "start",
+            "payload": {"profile": "default", "task": "work"},
+        },
+    )
+
+    assert calls == []
+    assert stale.sent == []
 
 
 def test_orchestrator_commands_use_a_fixed_allowlist(store: Any) -> None:
