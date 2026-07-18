@@ -23,6 +23,10 @@
   box-sizing: border-box;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 body {
   margin: 0;
   min-width: 320px;
@@ -641,6 +645,14 @@ h1 {
   padding: 104px 18px 18px;
 }
 
+.zones[data-room-count="1"] {
+  grid-template-columns: minmax(240px, 1fr);
+}
+
+.zones[data-room-count="2"] {
+  grid-template-columns: repeat(2, minmax(240px, 1fr));
+}
+
 .group-zone {
   --group-color: var(--orange);
   position: relative;
@@ -686,6 +698,33 @@ h1 {
   gap: 7px;
   font-size: 11px;
   text-transform: uppercase;
+}
+
+.zone-heading-copy {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.room-meta {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.group-zone.is-offline {
+  background: rgba(244, 244, 240, 0.76);
+}
+
+.group-zone.is-offline .agent {
+  opacity: 0.78;
+}
+
+.group-zone.is-local-room {
+  box-shadow: inset 0 3px 0 var(--group-color);
 }
 
 .zone-heading strong::before {
@@ -754,7 +793,7 @@ h1 {
 
 .zone-agents {
   position: absolute;
-  inset: 40px 8px 8px;
+  inset: 54px 8px 8px;
 }
 
 .agent {
@@ -2381,6 +2420,10 @@ h1 {
     grid-template-columns: minmax(0, 1fr);
     min-height: 620px;
     padding: 96px 10px 16px;
+  }
+
+  .zones[data-room-count] {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .group-zone {

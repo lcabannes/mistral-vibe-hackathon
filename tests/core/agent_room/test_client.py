@@ -14,6 +14,7 @@ from vibe.core.agent_room.client import (
     launch_agent_room_backend,
 )
 from vibe.core.agents.models import ManagedAgentState
+from vibe.core.team_workspace import TeamWorkspaceSnapshot
 
 
 def _run(run_id: str = "agent-1") -> dict[str, Any]:
@@ -52,11 +53,41 @@ def _run(run_id: str = "agent-1") -> dict[str, Any]:
     }
 
 
+def _team_workspace_snapshot() -> TeamWorkspaceSnapshot:
+    now = "2026-07-18T12:00:00Z"
+    return TeamWorkspaceSnapshot.model_validate_json(
+        json.dumps({
+            "identity": {
+                "workspace_id": f"ws_{'a' * 32}",
+                "project_fingerprint": "b" * 64,
+                "display_name": "Hackathon",
+            },
+            "privacy_mode": "status",
+            "history_scope": "status",
+            "connection_state": "connected",
+            "generated_at": now,
+            "members": [
+                {
+                    "member_id": f"member_{'c' * 32}",
+                    "display_name": "Lou",
+                    "presence": "online",
+                    "branch": "codex/team-room",
+                    "last_seen_at": now,
+                    "client_count": 1,
+                    "active_run_count": 0,
+                }
+            ],
+            "runs": [],
+        })
+    )
+
+
 class _RoomAPI:
     def __init__(self) -> None:
         self.revision = 1
         self.runs = [_run()]
         self.requests: list[tuple[str, str, dict[str, Any]]] = []
+        self.team_workspace: dict[str, Any] | None = None
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -73,6 +104,7 @@ class _RoomAPI:
             "tools": [],
             "coordination": {},
             "network": {},
+            "team_workspace": self.team_workspace,
         }
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
@@ -91,6 +123,9 @@ class _RoomAPI:
             self.runs.append(created)
             self.revision += 1
             return httpx.Response(202, json=created)
+        if request.url.path == "/api/team-workspace":
+            self.team_workspace = {**payload, "published_at": 1.0}
+            return httpx.Response(200, json=self.team_workspace)
         run = next(item for item in self.runs if item["tool_call_id"] == parts[2])
         if parts[3] == "messages":
             run["conversation"].append({
@@ -192,6 +227,32 @@ async def test_room_subscription_emits_staging_lifecycle_payload() -> None:
     await client.close()
 
 
+@pytest.mark.asyncio
+async def test_client_publishes_and_observes_team_only_snapshot_changes() -> None:
+    api = _RoomAPI()
+    client = AgentRoomClient(
+        "http://127.0.0.1:4173", "cli-session", transport=httpx.MockTransport(api)
+    )
+    observed = []
+    client.add_listener(observed.append)
+    await client.refresh()
+    team_snapshot = _team_workspace_snapshot()
+
+    await client.publish_team_workspace(
+        team_snapshot, local_member_id=f"member_{'c' * 32}", local_agent_links={}
+    )
+    refreshed = await client.refresh()
+
+    assert refreshed.team_workspace is not None
+    assert refreshed.team_workspace.snapshot == team_snapshot
+    assert refreshed.team_workspace.local_member_id == f"member_{'c' * 32}"
+    assert len(observed) == 2
+    assert any(
+        path == "/api/team-workspace" for _method, path, _payload in api.requests
+    )
+    await client.close()
+
+
 def test_discovery_uses_the_backend_owner_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -233,23 +294,17 @@ def test_ensure_backend_starts_requested_port_and_waits_until_ready(
 ) -> None:
     reachable = iter((False, True))
     launched: list[tuple[Path, int, str, bool]] = []
-    monkeypatch.setattr(
-        "vibe.core.agent_room.client.discover_agent_room", lambda: None
-    )
+    monkeypatch.setattr("vibe.core.agent_room.client.discover_agent_room", lambda: None)
     monkeypatch.setattr(
         "vibe.core.agent_room.client._agent_room_reachable",
         lambda _url: next(reachable),
     )
 
-    def launch(
-        workdir: Path, *, port: int, network_mode: str, force: bool
-    ) -> bool:
+    def launch(workdir: Path, *, port: int, network_mode: str, force: bool) -> bool:
         launched.append((workdir, port, network_mode, force))
         return True
 
-    monkeypatch.setattr(
-        "vibe.core.agent_room.client.launch_agent_room_backend", launch
-    )
+    monkeypatch.setattr("vibe.core.agent_room.client.launch_agent_room_backend", launch)
 
     assert (
         ensure_agent_room_backend(tmp_path, port=4183, network_mode="direct")

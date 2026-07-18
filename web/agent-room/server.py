@@ -38,6 +38,7 @@ from vibe.core.agents.models import BuiltinAgentName, ManagedAgentState
 from vibe.core.config import VibeConfig, resolve_api_key
 from vibe.core.config.harness_files import init_harness_files_manager
 from vibe.core.config.orchestrator_legacy import LegacyConfigOrchestrator
+from vibe.core.team_workspace import TeamWorkspaceSnapshot, discover_workspace_identity
 from vibe.core.tools.manager import ToolManager
 from vibe.core.utils.platform import is_windows
 from vibe.core.worktree import PreparedWorktree, WorktreeError, prepare_worktree_session
@@ -56,6 +57,8 @@ MAX_QUEUED_MESSAGES = 20
 MAX_MESSAGE_CHARS = 8_000
 MAX_CONVERSATION_ITEMS = 250
 MAX_EVENTS = 180
+MAX_TEAM_AGENT_LINKS = 100
+TEAM_WORKSPACE_STALE_SECONDS = 45.0
 MAX_ROOM_IMAGES = 4
 MAX_ROOM_IMAGE_BYTES = 4 * 1024 * 1024
 ALLOWED_IMAGE_TYPES = {"image/gif", "image/jpeg", "image/png", "image/webp"}
@@ -128,6 +131,9 @@ class AgentWorker:
             command.extend(("--resume-session", self.resume_session_id))
         if self.force_auto_approve:
             command.append("--auto-approve")
+        creation_flags = int(
+            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if is_windows() else 0
+        )
         self.process = subprocess.Popen(
             command,
             cwd=self.worktree.path,
@@ -140,7 +146,7 @@ class AgentWorker:
             errors="replace",
             bufsize=1,
             start_new_session=not is_windows(),
-            creationflags=(subprocess.CREATE_NEW_PROCESS_GROUP if is_windows() else 0),
+            creationflags=creation_flags,
         )
         Thread(
             target=self._read_stdout, name=f"room-out-{self.run_id}", daemon=True
@@ -213,6 +219,7 @@ class AgentRoomStore:
         self._session_root = vibe_home / "logs" / "session"
         self._registry_path = vibe_home / "agent-room" / "runs.json"
         self._runs = self._load_registry()
+        self._team_workspace: dict[str, Any] | None = None
         self._worker_environment, self._network = resolve_worker_network(network_mode)
         self._profiles = self._load_profiles()
         self._tools = self._load_tools()
@@ -226,6 +233,13 @@ class AgentRoomStore:
         with self._lock:
             for run in self._runs.values():
                 self._refresh_worktree_status_locked(run)
+            team_workspace = deepcopy(getattr(self, "_team_workspace", None))
+            if (
+                team_workspace is not None
+                and time.time() - float(team_workspace.get("published_at") or 0)
+                > TEAM_WORKSPACE_STALE_SECONDS
+            ):
+                team_workspace["snapshot"]["connection_state"] = "degraded"
             return {
                 "api_version": API_VERSION,
                 "instance_id": self._instance_id,
@@ -240,7 +254,56 @@ class AgentRoomStore:
                 "tools": deepcopy(self._tools),
                 "coordination": self._coordination_locked(),
                 "network": deepcopy(self._network),
+                "team_workspace": team_workspace,
             }
+
+    def update_team_workspace(self, payload: dict[str, Any]) -> dict[str, Any]:
+        raw_snapshot = payload.get("snapshot")
+        if not isinstance(raw_snapshot, dict):
+            raise ValueError("snapshot must be an object")
+        try:
+            snapshot = TeamWorkspaceSnapshot.model_validate_json(
+                json.dumps(raw_snapshot, ensure_ascii=False)
+            )
+        except ValueError as error:
+            raise ValueError(f"Invalid team workspace snapshot: {error}") from error
+
+        expected = discover_workspace_identity(self._workdir)
+        if (
+            snapshot.identity.workspace_id != expected.workspace_id
+            or snapshot.identity.project_fingerprint != expected.project_fingerprint
+        ):
+            raise ValueError("Team workspace snapshot belongs to another project")
+
+        local_member_id = self.required_text(payload, "local_member_id", 80)
+        member_ids = {member.member_id for member in snapshot.members}
+        if not re.fullmatch(r"member_[a-f0-9]{32}", local_member_id) or (
+            member_ids and local_member_id not in member_ids
+        ):
+            raise ValueError("local_member_id is not present in the team snapshot")
+        raw_links = payload.get("local_agent_links", {})
+        if not isinstance(raw_links, dict) or len(raw_links) > MAX_TEAM_AGENT_LINKS:
+            raise ValueError("local_agent_links must be a bounded object")
+        team_run_ids = {run.run_id for run in snapshot.runs}
+        with self._lock:
+            links: dict[str, str] = {}
+            for team_run_id, local_run_id in raw_links.items():
+                if (
+                    not isinstance(team_run_id, str)
+                    or not isinstance(local_run_id, str)
+                    or team_run_id not in team_run_ids
+                    or local_run_id not in self._runs
+                ):
+                    raise ValueError("local_agent_links contains an unknown run")
+                links[team_run_id] = local_run_id
+            self._team_workspace = {
+                "snapshot": snapshot.model_dump(mode="json"),
+                "local_member_id": local_member_id,
+                "local_agent_links": links,
+                "published_at": time.time(),
+            }
+            self._revision += 1
+            return deepcopy(self._team_workspace)
 
     def create(self, payload: dict[str, Any]) -> dict[str, Any]:
         profile = (
@@ -720,7 +783,9 @@ class AgentRoomStore:
         auto_approve: bool = False,
     ) -> dict[str, Any]:
         with self._lock:
-            active_count = sum(run.get("runtime_live") for run in self._runs.values())
+            active_count = sum(
+                bool(run.get("runtime_live")) for run in self._runs.values()
+            )
             if active_count >= MAX_ACTIVE_AGENTS:
                 raise ValueError(f"At most {MAX_ACTIVE_AGENTS} agents can be active")
         run_id = fixed_run_id or f"agent-{uuid4().hex}"
@@ -832,7 +897,7 @@ class AgentRoomStore:
                 return worker
             if worker is None or not run.get("runtime_live"):
                 active_count = sum(
-                    item.get("runtime_live") for item in self._runs.values()
+                    bool(item.get("runtime_live")) for item in self._runs.values()
                 )
                 if active_count >= MAX_ACTIVE_AGENTS:
                     raise ValueError(
@@ -1447,7 +1512,7 @@ class AgentRoomStore:
             "completed": ManagedAgentState.STOPPED,
             "cancelled": ManagedAgentState.STOPPED,
             "stopped": ManagedAgentState.STOPPED,
-        }.get(run.get("state"), ManagedAgentState.FAILED)
+        }.get(str(run.get("state") or ""), ManagedAgentState.FAILED)
         usage = run.get("usage") or {}
         return {
             "agent_id": run["tool_call_id"],
@@ -1695,7 +1760,7 @@ def terminate_process_tree(process: subprocess.Popen[str]) -> None:
 
 
 class AgentRoomHandler(SimpleHTTPRequestHandler):
-    server: AgentRoomHTTPServer
+    server: AgentRoomHTTPServer  # pyright: ignore[reportIncompatibleVariableOverride]
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, directory=str(REPOSITORY_ROOT), **kwargs)
@@ -1736,6 +1801,9 @@ class AgentRoomHandler(SimpleHTTPRequestHandler):
             path = urlparse(self.path).path
             if path == "/api/agent-runs":
                 self._send_json(self.server.store.create(payload), HTTPStatus.ACCEPTED)
+                return
+            if path == "/api/team-workspace":
+                self._send_json(self.server.store.update_team_workspace(payload))
                 return
             parts = path.strip("/").split("/")
             if len(parts) < RUN_ACTION_PARTS or parts[:2] != ["api", "agent-runs"]:

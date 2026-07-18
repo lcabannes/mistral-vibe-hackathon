@@ -5,6 +5,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from vibe.core.agents.models import ManagedAgentSnapshot, ManagedAgentState
+from vibe.core.team_workspace.models import TeamWorkspaceSnapshot
 
 
 class AgentRoomConversationMessage(BaseModel):
@@ -26,6 +27,15 @@ class AgentRoomProfile(BaseModel):
     name: str
     display_name: str | None = None
     description: str = ""
+
+
+class AgentRoomTeamWorkspace(BaseModel):
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    snapshot: TeamWorkspaceSnapshot
+    local_member_id: str
+    local_agent_links: dict[str, str] = Field(default_factory=dict)
+    published_at: float = 0.0
 
 
 class AgentRoomRun(BaseModel):
@@ -120,3 +130,4 @@ class AgentRoomSnapshot(BaseModel):
     tools: tuple[dict[str, Any], ...] = ()
     coordination: dict[str, Any] = Field(default_factory=dict)
     network: dict[str, Any] = Field(default_factory=dict)
+    team_workspace: AgentRoomTeamWorkspace | None = None

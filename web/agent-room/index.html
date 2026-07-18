@@ -21,7 +21,7 @@
             height="28"
           />
           <span>VIBE</span>
-          <span class="brand-section">Agent room</span>
+          <span class="brand-section">Team rooms</span>
         </a>
 
         <div class="feed-controls">
@@ -36,7 +36,7 @@
         <nav class="primary-nav" aria-label="Primary">
           <button class="nav-item is-active" type="button" aria-current="page">
             <span class="nav-glyph room-glyph" aria-hidden="true"></span>
-            Room
+            Coworkers
           </button>
           <button class="nav-item" type="button" disabled>
             <span class="nav-glyph agents-glyph" aria-hidden="true"></span>
@@ -50,7 +50,7 @@
 
         <div class="group-nav">
           <div class="sidebar-heading">
-            <span>Groups</span>
+            <span id="room-list-heading">Coworker rooms</span>
             <button
               class="icon-button"
               id="add-group-button"
@@ -65,9 +65,9 @@
         </div>
 
         <div class="sidebar-foot">
-          <span class="avatar">LC</span>
+          <span class="avatar" id="local-workspace-avatar">ME</span>
           <span>
-            <strong>Local workspace</strong>
+            <strong id="local-workspace-name">Local workspace</strong>
             <small id="workspace-branch">Local branch</small>
           </span>
         </div>
@@ -76,8 +76,8 @@
       <main class="main-content">
         <section class="room-header" aria-labelledby="room-title">
           <div>
-            <p class="eyebrow">Control home</p>
-            <h1 id="room-title">The agent room</h1>
+            <p class="eyebrow">Shared control home</p>
+            <h1 id="room-title">Team agent rooms</h1>
           </div>
           <div class="summary-strip" aria-label="Agent summary">
             <div><strong id="summary-running">0</strong><span>Running</span></div>
@@ -226,7 +226,7 @@
             />
           </label>
           <label>
-            Group
+            Room
             <select id="agent-group" name="agent-group" required></select>
           </label>
           <label>

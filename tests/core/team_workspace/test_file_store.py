@@ -46,6 +46,7 @@ def _store(
     max_file_bytes: int = 64 * 1024,
     history_scope: HistoryScope = HistoryScope.STATUS,
     history_limit: int = 50,
+    max_event_files: int = 2_000,
 ) -> SharedTeamWorkspaceStore:
     return SharedTeamWorkspaceStore(
         shared_root=root,
@@ -57,6 +58,7 @@ def _store(
         max_file_bytes=max_file_bytes,
         history_scope=history_scope,
         history_limit=history_limit,
+        max_event_files=max_event_files,
     )
 
 
@@ -91,7 +93,8 @@ def _event(
 ) -> TeamActivityEvent:
     return TeamActivityEvent(
         workspace_id=IDENTITY.workspace_id,
-        event_id=event_id or f"event_{sequence:032x}",
+        event_id=event_id
+        or f"event_{client_id.removeprefix('client_')[:16]}{sequence:016x}",
         member_id=member_id,
         member_display_name="Ada" if member_id == MEMBER_A else "Grace",
         client_id=client_id,
@@ -133,6 +136,37 @@ def test_two_clients_share_presence_and_sanitized_runs(tmp_path: Path) -> None:
         ActivityState.ATTENTION,
     }
     assert all(member.presence is PresenceState.ONLINE for member in snapshot.members)
+
+
+def test_restarted_client_can_advance_same_run_with_lower_sequence(
+    tmp_path: Path,
+) -> None:
+    first = _store(tmp_path, MEMBER_A, CLIENT_A)
+    restarted = _store(tmp_path, MEMBER_A, CLIENT_B)
+    first.initialize(NOW)
+    first.write_event(
+        _event(
+            sequence=9,
+            state=ActivityState.WORKING,
+            event_id=f"event_{'d' * 32}",
+            occurred_at=NOW + timedelta(seconds=9),
+        )
+    )
+    restarted.write_event(
+        _event(
+            sequence=1,
+            state=ActivityState.ATTENTION,
+            event_id=f"event_{'d' * 32}",
+            client_id=CLIENT_B,
+            occurred_at=NOW + timedelta(seconds=10),
+        )
+    )
+
+    snapshot = _store(tmp_path).read_snapshot(NOW + timedelta(seconds=11))
+
+    assert len(snapshot.runs) == 1
+    assert snapshot.runs[0].client_id == CLIENT_B
+    assert snapshot.runs[0].state is ActivityState.ATTENTION
 
 
 def test_atomic_writes_leave_no_temp_files(tmp_path: Path) -> None:
@@ -283,3 +317,261 @@ def test_message_history_is_redacted_and_bounded_per_run(tmp_path: Path) -> None
 
     assert [entry.sequence for entry in snapshot.runs[0].history] == [3, 4]
     assert all("secret" not in (entry.text or "") for entry in snapshot.runs[0].history)
+
+
+def test_event_cap_selects_latest_state_without_starving_other_clients(
+    tmp_path: Path,
+) -> None:
+    first = _store(tmp_path, MEMBER_A, CLIENT_A)
+    second = _store(tmp_path, MEMBER_B, CLIENT_B)
+    first.initialize(NOW)
+    for sequence in range(1, 5):
+        first.write_event(_event(sequence=sequence, state=ActivityState.WORKING))
+    first.write_event(_event(sequence=5, state=ActivityState.ATTENTION))
+    second.write_event(
+        _event(
+            sequence=1,
+            state=ActivityState.RUNNING,
+            member_id=MEMBER_B,
+            client_id=CLIENT_B,
+            run_id="run_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        )
+    )
+
+    snapshot = _store(tmp_path, max_event_files=2).read_snapshot(
+        NOW + timedelta(seconds=10)
+    )
+
+    assert snapshot.connection_state is ConnectionState.CONNECTED
+    assert {run.client_id for run in snapshot.runs} == {CLIENT_A, CLIENT_B}
+    latest = next(run for run in snapshot.runs if run.client_id == CLIENT_A)
+    assert latest.sequence == 5
+    assert latest.state is ActivityState.ATTENTION
+
+
+def test_conversation_cap_selects_latest_entry_fairly_across_clients(
+    tmp_path: Path,
+) -> None:
+    first = _store(tmp_path, MEMBER_A, CLIENT_A, history_scope=HistoryScope.MESSAGES)
+    second = _store(tmp_path, MEMBER_B, CLIENT_B, history_scope=HistoryScope.MESSAGES)
+    first.initialize(NOW)
+    first.write_event(_event(sequence=1, state=ActivityState.WORKING))
+    second.write_event(
+        _event(
+            sequence=1,
+            state=ActivityState.WORKING,
+            member_id=MEMBER_B,
+            client_id=CLIENT_B,
+            run_id="run_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        )
+    )
+    for sequence in range(2, 5):
+        first.write_conversation(
+            TeamConversationEntry(
+                workspace_id=IDENTITY.workspace_id,
+                entry_id=f"entry_{sequence:032x}",
+                member_id=MEMBER_A,
+                client_id=CLIENT_A,
+                sequence=sequence,
+                run_id=RUN_A,
+                role=ConversationRole.USER,
+                history_scope=HistoryScope.MESSAGES,
+                text=f"first {sequence}",
+                occurred_at=NOW + timedelta(seconds=sequence),
+            )
+        )
+    second.write_conversation(
+        TeamConversationEntry(
+            workspace_id=IDENTITY.workspace_id,
+            entry_id="entry_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            member_id=MEMBER_B,
+            client_id=CLIENT_B,
+            sequence=2,
+            run_id="run_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            role=ConversationRole.ASSISTANT,
+            history_scope=HistoryScope.MESSAGES,
+            text="second latest",
+            occurred_at=NOW + timedelta(seconds=2),
+        )
+    )
+
+    snapshot = _store(
+        tmp_path, history_scope=HistoryScope.MESSAGES, max_event_files=2
+    ).read_snapshot(NOW + timedelta(seconds=10))
+
+    history = {run.client_id: run.history for run in snapshot.runs}
+    assert [entry.sequence for entry in history[CLIENT_A]] == [4]
+    assert [entry.sequence for entry in history[CLIENT_B]] == [2]
+
+
+@pytest.mark.parametrize(
+    "terminal", [ActivityState.COMPLETED, ActivityState.FAILED, ActivityState.CANCELLED]
+)
+def test_event_compaction_preserves_terminal_monotonicity(
+    tmp_path: Path, terminal: ActivityState
+) -> None:
+    store = _store(tmp_path, MEMBER_A, CLIENT_A, max_event_files=1)
+    store.initialize(NOW)
+    store.write_event(_event(sequence=1, state=terminal))
+    store.write_event(_event(sequence=2, state=ActivityState.WORKING))
+
+    snapshot = store.read_snapshot(NOW + timedelta(seconds=3))
+
+    assert snapshot.runs[0].state is terminal
+    assert snapshot.runs[0].sequence == 1
+    assert len(list((store.workspace_dir / "events").rglob("*.json"))) == 1
+
+
+def test_compaction_and_restart_preserve_original_run_start_time(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path, MEMBER_A, CLIENT_A, max_event_files=1)
+    store.initialize(NOW)
+    store.write_event(
+        _event(
+            sequence=1,
+            state=ActivityState.RUNNING,
+            occurred_at=NOW + timedelta(seconds=1),
+        )
+    )
+    store.write_event(
+        _event(
+            sequence=2,
+            state=ActivityState.WORKING,
+            occurred_at=NOW + timedelta(seconds=2),
+        )
+    )
+    store.write_event(
+        _event(
+            sequence=3,
+            state=ActivityState.COMPLETED,
+            occurred_at=NOW + timedelta(seconds=3),
+        )
+    )
+
+    restarted = _store(tmp_path, max_event_files=1)
+    snapshot = restarted.read_snapshot(NOW + timedelta(seconds=4))
+
+    assert len(list((store.workspace_dir / "events").rglob("*.json"))) == 1
+    assert snapshot.runs[0].state is ActivityState.COMPLETED
+    assert snapshot.runs[0].started_at == NOW + timedelta(seconds=1)
+    assert snapshot.runs[0].updated_at == NOW + timedelta(seconds=3)
+
+
+def test_newest_sequence_one_client_survives_stream_overflow(tmp_path: Path) -> None:
+    cap = 3
+    first = _store(
+        tmp_path,
+        MEMBER_A,
+        "client_00000000000000000000000000000001",
+        max_event_files=cap,
+    )
+    first.initialize(NOW)
+    newest_client = ""
+    for index in range(1, cap + 2):
+        client_id = f"client_{index:032x}"
+        newest_client = client_id
+        writer = _store(tmp_path, MEMBER_A, client_id, max_event_files=cap)
+        writer.write_event(
+            _event(
+                sequence=1,
+                state=ActivityState.WORKING,
+                event_id=f"event_{index:032x}",
+                client_id=client_id,
+                run_id=f"run_{index:032x}",
+                occurred_at=NOW + timedelta(seconds=index),
+            )
+        )
+
+    snapshot = _store(tmp_path, max_event_files=cap).read_snapshot(
+        NOW + timedelta(seconds=10)
+    )
+
+    assert newest_client in {run.client_id for run in snapshot.runs}
+    assert len(list((first.workspace_dir / "events").rglob("*.json"))) == cap
+
+
+def test_conversation_overflow_keeps_newest_sequence_one_client(tmp_path: Path) -> None:
+    cap = 3
+    first = _store(
+        tmp_path,
+        MEMBER_A,
+        "client_00000000000000000000000000000001",
+        history_scope=HistoryScope.MESSAGES,
+        max_event_files=cap,
+    )
+    first.initialize(NOW)
+    newest_client = ""
+    for index in range(1, cap + 2):
+        client_id = f"client_{index:032x}"
+        newest_client = client_id
+        writer = _store(
+            tmp_path,
+            MEMBER_A,
+            client_id,
+            history_scope=HistoryScope.MESSAGES,
+            max_event_files=cap,
+        )
+        writer.write_event(
+            _event(
+                sequence=1,
+                state=ActivityState.WORKING,
+                event_id=f"event_{index:032x}",
+                client_id=client_id,
+                run_id=f"run_{index:032x}",
+                occurred_at=NOW + timedelta(seconds=index),
+            )
+        )
+        writer.write_conversation(
+            TeamConversationEntry(
+                workspace_id=IDENTITY.workspace_id,
+                entry_id=f"entry_{index:032x}",
+                member_id=MEMBER_A,
+                client_id=client_id,
+                sequence=1,
+                run_id=f"run_{index:032x}",
+                role=ConversationRole.USER,
+                history_scope=HistoryScope.MESSAGES,
+                text=f"client {index}",
+                occurred_at=NOW + timedelta(seconds=index),
+            )
+        )
+
+    snapshot = _store(
+        tmp_path, history_scope=HistoryScope.MESSAGES, max_event_files=cap
+    ).read_snapshot(NOW + timedelta(seconds=10))
+
+    represented = {entry.client_id for run in snapshot.runs for entry in run.history}
+    assert newest_client in represented
+    assert len(list((first.workspace_dir / "conversations").rglob("*.json"))) == cap
+
+
+@pytest.mark.parametrize("tightened", [HistoryScope.MARKERS, HistoryScope.STATUS])
+def test_message_policy_can_tighten_without_manifest_mismatch(
+    tmp_path: Path, tightened: HistoryScope
+) -> None:
+    messages = _store(tmp_path, MEMBER_A, CLIENT_A, history_scope=HistoryScope.MESSAGES)
+    messages.initialize(NOW)
+    messages.write_event(_event(sequence=1, state=ActivityState.WORKING))
+    messages.write_conversation(
+        TeamConversationEntry(
+            workspace_id=IDENTITY.workspace_id,
+            entry_id="entry_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            member_id=MEMBER_A,
+            client_id=CLIENT_A,
+            sequence=2,
+            run_id=RUN_A,
+            role=ConversationRole.USER,
+            history_scope=HistoryScope.MESSAGES,
+            text="previously shared message",
+            occurred_at=NOW + timedelta(seconds=2),
+        )
+    )
+    tightened_store = _store(tmp_path, MEMBER_A, CLIENT_A, history_scope=tightened)
+
+    tightened_store.initialize(NOW + timedelta(seconds=3))
+    snapshot = tightened_store.read_snapshot(NOW + timedelta(seconds=3))
+
+    assert snapshot.connection_state is ConnectionState.CONNECTED
+    assert snapshot.history_scope is tightened
+    assert not list((messages.workspace_dir / "conversations").rglob("*.json"))

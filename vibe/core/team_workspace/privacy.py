@@ -17,6 +17,7 @@ _SECRET_RE = re.compile(
 )
 _ENV_RE = re.compile(r"(?m)^[A-Z][A-Z0-9_]{2,}\s*=.*$")
 _COMMAND_RE = re.compile(r"(?m)^\s*(?:\$|>|%)\s+.*$")
+_SLASH_COMMAND_RE = re.compile(r"(?m)^\s*/[A-Za-z][^\r\n]*$")
 
 
 def sanitize_shared_message(value: str) -> str:
@@ -26,6 +27,7 @@ def sanitize_shared_message(value: str) -> str:
     text = _SECRET_RE.sub(r"\1=[Filtered]", text)
     text = _ENV_RE.sub("[Environment value omitted]", text)
     text = _COMMAND_RE.sub("[Command omitted]", text)
+    text = _SLASH_COMMAND_RE.sub("[Command omitted]", text)
     scrubbed = scrub_paths(text)
     if not isinstance(scrubbed, str):  # pragma: no cover - input is always a string
         return "[Filtered]"

@@ -474,8 +474,7 @@ async def test_home_displays_clickable_agent_room_link() -> None:
     async with app.run_test(size=(100, 26)) as pilot:
         app.office.update_view(
             OfficeViewModel(
-                AgentActivitySnapshot(session_id="room"),
-                server_url=room_url,
+                AgentActivitySnapshot(session_id="room"), server_url=room_url
             )
         )
         await pilot.pause()

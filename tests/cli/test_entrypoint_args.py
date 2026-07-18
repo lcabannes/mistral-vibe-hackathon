@@ -59,10 +59,7 @@ def test_server_starts_backend_and_continues_with_shared_url(
         calls.append((workdir, port, network_mode))
         return "http://127.0.0.1:4183"
 
-    monkeypatch.setattr(
-        "vibe.core.agent_room.ensure_agent_room_backend",
-        ensure,
-    )
+    monkeypatch.setattr("vibe.core.agent_room.ensure_agent_room_backend", ensure)
     monkeypatch.chdir(tmp_path)
     args = _parse(
         monkeypatch,

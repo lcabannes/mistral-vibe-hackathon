@@ -26,11 +26,19 @@ Mistral Vibe is a command-line coding assistant powered by Mistral's models. It 
 
 ## Hackathon Agent Room quick start
 
-This fork adds the browser Agent Room and the matching Textual **Home** view.
+This fork adds the browser Agent Room and matching Textual **Home** and
+**Coworker rooms** views.
 Both are clients of one local backend, so they show the same real agents,
 conversations, queues, approvals, questions, token usage, cost, worktrees, and
 lifecycle state. Install this repository from source; the released
 `mistral-vibe` package does not include these hackathon features.
+
+The committed `.vibe/team.toml` autojoins trusted clones to the same
+`vibe-team-demo` branch on their existing `origin`. Each coworker gets one room
+in the CLI and browser, with one cat per shared agent. Full controls and local
+conversation data stay on the owning laptop; remote cats expose only the
+privacy-filtered state synchronized through Git. This demo shares sanitized
+messages. Run `uv run --no-dev vibe team leave` to stop sharing locally.
 
 ### 1. Install the fork
 
@@ -74,6 +82,104 @@ network mode: it keeps a working proxy and bypasses an inherited proxy that
 rejects Mistral API traffic. Pass `--server-network-mode direct` to always
 bypass shell proxy settings, or `--server-network-mode inherit` to always keep
 them. Use `--server-port PORT` to select another loopback port.
+
+A coworker only needs to clone this repository, trust it when prompted, and run
+the same command. Team presence and agent status refresh automatically; no
+separate room server or account setup is required beyond Git access to
+`origin`.
+
+### Two-laptop team demo
+
+Both laptops must have read/write access to the same Git remote. Use a distinct
+Git email on each laptop so Vibe creates two coworker identities instead of
+collapsing both machines into one room. Never share a Mistral API key between
+laptops or commit one to this repository.
+
+Before this feature is merged to the remote default branch, use the following
+clone command on both laptops after that branch has been pushed. After merge,
+use the commands in the Laptop A and Laptop B sections unchanged.
+
+```bash
+git clone --branch codex/team-coworker-rooms git@github.com:lcabannes/mistral-vibe-hackathon.git
+```
+
+#### Laptop A: install and start
+
+```bash
+git clone git@github.com:lcabannes/mistral-vibe-hackathon.git
+cd mistral-vibe-hackathon
+git config user.name "Laptop A name"
+git config user.email "laptop-a@example.test"
+uv sync --no-dev
+uv run --no-dev vibe --setup
+uv run --no-dev vibe --server
+```
+
+Choose **Trust repository** when Vibe asks. The committed `.vibe/team.toml`
+then autojoins this clone to `origin` on the `vibe-team-demo` branch. Keep the
+CLI open. Press `Ctrl+5` to open **Coworker rooms**. From `Ctrl+1` **Home**,
+select **Open Agent Room**, or open
+<http://127.0.0.1:4173/web/agent-room/> directly.
+
+#### Laptop B: install and start
+
+```bash
+git clone git@github.com:lcabannes/mistral-vibe-hackathon.git
+cd mistral-vibe-hackathon
+git config user.name "Laptop B name"
+git config user.email "laptop-b@example.test"
+uv sync --no-dev
+uv run --no-dev vibe --setup
+uv run --no-dev vibe --server
+```
+
+Choose **Trust repository**, keep the CLI open, and open **Coworker rooms** and
+the local Agent Room URL as on Laptop A. Within the sync interval, both screens
+should show one room for Laptop A and one room for Laptop B.
+
+If either clone shows **local only**, or that laptop previously ran
+`vibe team leave`, rejoin with one command from that clone and restart Vibe:
+
+```bash
+uv run --no-dev vibe team join origin --history messages --trust
+uv run --no-dev vibe --server
+```
+
+The join command writes or confirms `.vibe/team.toml` and initializes the
+shared branch. Commit and push `.vibe/team.toml` only if the command changed it;
+fresh clones then use the automatic path above.
+
+#### Create an agent on Laptop A
+
+1. In Laptop A's browser, select **+ Agent** in Laptop A's room.
+2. Set the display name to `Scout` and the task to `Inspect the repository and summarize the current work`.
+3. Select **Launch agent**. A real local worker and isolated Git worktree start on Laptop A.
+4. Confirm the `Scout` cat appears in Laptop A's web room and in CLI **Home**.
+
+#### Observe it on Laptop B
+
+1. Leave both CLIs running for up to 30 seconds so the Git-backed heartbeat and activity update can converge.
+2. On Laptop B, press `Ctrl+5`, select Laptop A's room, and confirm `Scout` appears in its agent list.
+3. In Laptop B's browser, select Laptop A's room and open the `Scout` cat's **Status** or **History** view.
+4. Confirm Laptop B cannot message, stop, move, approve, or merge Laptop A's cat. Those controls remain on the owning laptop.
+5. Change `Scout`'s state on Laptop A by sending a message or stopping it, then confirm the coarse synchronized state updates on Laptop B.
+
+The team branch contains only bounded, sanitized team records. Local prompts,
+approvals, worktree paths, session IDs, and merge controls are not copied into
+remote Agent Room controls. This demo opts into sanitized message history; stop
+future sharing on either laptop with:
+
+```bash
+uv run --no-dev vibe team leave --trust
+```
+
+For troubleshooting, verify the shared branch exists and both laptops use
+different Git emails:
+
+```bash
+git ls-remote --heads origin vibe-team-demo
+git config user.email
+```
 
 Select any agent to compare its conversation
 and status with the webpage, send another message, cancel or stop work, resolve

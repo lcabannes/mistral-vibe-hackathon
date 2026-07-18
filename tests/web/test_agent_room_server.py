@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event, Thread
 from types import SimpleNamespace
@@ -74,6 +75,43 @@ def make_run(run_id: str = "worker-1") -> dict[str, Any]:
     }
 
 
+def make_team_snapshot(workdir: Path) -> dict[str, Any]:
+    now = datetime(2026, 7, 18, 12, 0, tzinfo=UTC).isoformat()
+    identity = room.discover_workspace_identity(workdir).model_dump(mode="json")
+    return {
+        "identity": identity,
+        "privacy_mode": "status",
+        "history_scope": "status",
+        "connection_state": "connected",
+        "generated_at": now,
+        "members": [
+            {
+                "member_id": f"member_{'a' * 32}",
+                "display_name": "Lou",
+                "presence": "online",
+                "branch": "codex/team-room",
+                "last_seen_at": now,
+                "client_count": 1,
+                "active_run_count": 1,
+            }
+        ],
+        "runs": [
+            {
+                "run_id": f"run_{'b' * 32}",
+                "member_id": f"member_{'a' * 32}",
+                "member_display_name": "Lou",
+                "client_id": f"client_{'c' * 32}",
+                "agent_name": "default",
+                "agent_display_name": "Patch",
+                "state": "working",
+                "started_at": now,
+                "updated_at": now,
+                "sequence": 1,
+            }
+        ],
+    }
+
+
 @pytest.fixture
 def store(tmp_path: Path) -> Any:
     instance = object.__new__(room.AgentRoomStore)
@@ -120,6 +158,57 @@ def test_snapshot_exposes_revisioned_shared_backend_identity(store: Any) -> None
         "workdir": str(store._workdir),
         "integration_branch": "codex/test-room",
     }
+    assert snapshot["team_workspace"] is None
+
+
+def test_team_workspace_projection_is_validated_and_memory_only(store: Any) -> None:
+    store._runs["worker-1"] = make_run()
+    team_run_id = f"run_{'b' * 32}"
+    payload = {
+        "snapshot": make_team_snapshot(store._workdir),
+        "local_member_id": f"member_{'a' * 32}",
+        "local_agent_links": {team_run_id: "worker-1"},
+    }
+
+    published = store.update_team_workspace(payload)
+    snapshot = store.snapshot()
+
+    assert published["local_member_id"] == f"member_{'a' * 32}"
+    assert published["local_agent_links"] == {team_run_id: "worker-1"}
+    assert snapshot["team_workspace"] == published
+    assert store._revision == 1
+    assert not store._registry_path.exists()
+
+
+def test_team_workspace_rejects_an_unknown_local_agent_link(store: Any) -> None:
+    payload = {
+        "snapshot": make_team_snapshot(store._workdir),
+        "local_member_id": f"member_{'a' * 32}",
+        "local_agent_links": {f"run_{'b' * 32}": "remote-run"},
+    }
+
+    with pytest.raises(ValueError, match="unknown run"):
+        store.update_team_workspace(payload)
+
+
+def test_team_workspace_projection_becomes_stale_without_a_cli_publisher(
+    store: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    published = store.update_team_workspace({
+        "snapshot": make_team_snapshot(store._workdir),
+        "local_member_id": f"member_{'a' * 32}",
+        "local_agent_links": {},
+    })
+    monkeypatch.setattr(
+        room.time,
+        "time",
+        lambda: published["published_at"] + room.TEAM_WORKSPACE_STALE_SECONDS + 1,
+    )
+
+    snapshot = store.snapshot()
+
+    assert snapshot["team_workspace"]["snapshot"]["connection_state"] == "degraded"
+    assert published["snapshot"]["connection_state"] == "connected"
 
 
 def test_only_one_backend_can_own_a_vibe_home(

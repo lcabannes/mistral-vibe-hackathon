@@ -255,6 +255,7 @@ from vibe.core.team_workspace import (
     TeamWorkspaceService,
     TeamWorkspaceSnapshot,
     build_team_workspace_service,
+    derive_run_id,
 )
 from vibe.core.telemetry.types import (
     ProjectPickerTelemetryPayload,
@@ -692,6 +693,8 @@ class VibeApp(App):  # noqa: PLR0904
         self._agent_room_connected = False
         self._agent_room_snapshot: AgentRoomSnapshot | None = None
         self._agent_room_discovery_timer: Timer | None = None
+        self._pending_agent_room_team_snapshot: TeamWorkspaceSnapshot | None = None
+        self._agent_room_team_publish_task: asyncio.Task[None] | None = None
         if self._agent_room_client is not None:
             self._agent_room_client.add_listener(self._on_agent_room_snapshot)
             self.agent_loop.set_agent_management_port(self._agent_room_client)
@@ -803,6 +806,7 @@ class VibeApp(App):  # noqa: PLR0904
         self._agent_task = asyncio.create_task(
             self._handle_agent_loop_turn(
                 content,
+                publish_conversation=not content.lstrip().startswith("/"),
                 prebuilt_images=prebuilt_images,
                 prebuilt_payload=prebuilt_payload,
             )
@@ -844,6 +848,12 @@ class VibeApp(App):  # noqa: PLR0904
         self._team_workspace_publish_tasks: set[asyncio.Task[TeamWorkspaceSnapshot]] = (
             set()
         )
+        self._team_workspace_activity_tasks: dict[
+            str, asyncio.Task[TeamWorkspaceSnapshot]
+        ] = {}
+        self._team_workspace_pending_activity: dict[
+            str, tuple[str, str, AgentRunState, str | None]
+        ] = {}
         if service is None:
             return
         service.add_listener(self._refresh_team_workspace_pages)
@@ -879,6 +889,8 @@ class VibeApp(App):  # noqa: PLR0904
             history_limit=settings.history_limit,
             heartbeat_interval_seconds=settings.heartbeat_interval_seconds,
             presence_ttl_seconds=settings.presence_ttl_seconds,
+            team_repository_url=settings.team_repository_url,
+            team_branch=settings.team_branch,
         )
 
     def _resolve_primary_agent_profile(self, name: str) -> str | None:
@@ -1095,6 +1107,9 @@ class VibeApp(App):  # noqa: PLR0904
             return False
         self._on_agent_room_snapshot(snapshot)
         self.agent_loop.set_agent_management_port(client)
+        service = self._team_workspace_service
+        if service is not None and service.enabled:
+            self._schedule_agent_room_team_workspace(service.snapshot)
         return True
 
     async def _discover_agent_room(self) -> None:
@@ -1164,6 +1179,8 @@ class VibeApp(App):  # noqa: PLR0904
 
         publish_tasks = tuple(self._team_workspace_publish_tasks)
         self._team_workspace_publish_tasks.clear()
+        self._team_workspace_activity_tasks.clear()
+        self._team_workspace_pending_activity.clear()
         for task in publish_tasks:
             if not task.done():
                 task.cancel()
@@ -1172,6 +1189,14 @@ class VibeApp(App):  # noqa: PLR0904
                 continue
             with suppress(asyncio.CancelledError, Exception):
                 await task
+
+        bridge_task = self._agent_room_team_publish_task
+        self._agent_room_team_publish_task = None
+        self._pending_agent_room_team_snapshot = None
+        if bridge_task is not None and not bridge_task.done():
+            bridge_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await bridge_task
 
         service = self._team_workspace_service
         if service is None:
@@ -1219,18 +1244,62 @@ class VibeApp(App):  # noqa: PLR0904
         service = self._team_workspace_service
         if service is None or not service.enabled or not agent_name:
             return
+        self._team_workspace_pending_activity[local_run_id] = (
+            agent_name,
+            agent_display_name or agent_name,
+            state,
+            current_activity,
+        )
+        current = self._team_workspace_activity_tasks.get(local_run_id)
+        if current is not None and not current.done():
+            return
         task = asyncio.create_task(
-            service.publish_activity(
-                local_run_id=local_run_id,
-                agent_name=agent_name,
-                agent_display_name=agent_display_name or agent_name,
-                state=ActivityState(state.value),
-                summary=self._team_activity_summary(state, current_activity),
-            ),
+            self._drain_team_activity(local_run_id),
             name=f"team-activity-{local_run_id}",
         )
+        self._team_workspace_activity_tasks[local_run_id] = task
         self._team_workspace_publish_tasks.add(task)
-        task.add_done_callback(self._team_workspace_publish_done)
+        task.add_done_callback(
+            lambda completed: self._team_workspace_activity_done(
+                local_run_id, completed
+            )
+        )
+
+    async def _drain_team_activity(self, local_run_id: str) -> TeamWorkspaceSnapshot:
+        service = self._team_workspace_service
+        if service is None:
+            raise RuntimeError("Team workspace service is not available")
+        snapshot = service.snapshot
+        while publication := self._team_workspace_pending_activity.pop(
+            local_run_id, None
+        ):
+            agent_name, agent_display_name, state, current_activity = publication
+            snapshot = await service.publish_activity(
+                local_run_id=local_run_id,
+                agent_name=agent_name,
+                agent_display_name=agent_display_name,
+                state=ActivityState(state.value),
+                summary=self._team_activity_summary(state, current_activity),
+            )
+        return snapshot
+
+    def _team_workspace_activity_done(
+        self, local_run_id: str, task: asyncio.Task[TeamWorkspaceSnapshot]
+    ) -> None:
+        if self._team_workspace_activity_tasks.get(local_run_id) is task:
+            self._team_workspace_activity_tasks.pop(local_run_id, None)
+        self._team_workspace_publish_done(task)
+        if local_run_id in self._team_workspace_pending_activity:
+            agent_name, agent_display_name, state, current_activity = (
+                self._team_workspace_pending_activity[local_run_id]
+            )
+            self._schedule_team_activity(
+                local_run_id=local_run_id,
+                agent_name=agent_name,
+                agent_display_name=agent_display_name,
+                state=state,
+                current_activity=current_activity,
+            )
 
     def _team_workspace_publish_done(
         self, task: asyncio.Task[TeamWorkspaceSnapshot]
@@ -1322,11 +1391,10 @@ class VibeApp(App):  # noqa: PLR0904
                 state = AgentRunState.FAILED
             case ManagedAgentState.STOPPED:
                 state = AgentRunState.CANCELLED
-        profile = self.agent_loop.agent_manager.available_agents.get(event.profile)
         self._schedule_team_activity(
             local_run_id=f"managed:{event.child_session_id}",
             agent_name=event.profile,
-            agent_display_name=profile.display_name if profile else event.profile,
+            agent_display_name=event.agent_display_name,
             state=state,
             current_activity=event.current_activity,
         )
@@ -1362,11 +1430,57 @@ class VibeApp(App):  # noqa: PLR0904
         self.query_one(HomePage).update_view(self._home_view_model(workspace_snapshot))
 
     def _refresh_team_workspace_pages(self, snapshot: TeamWorkspaceSnapshot) -> None:
+        self._schedule_agent_room_team_workspace(snapshot)
         if not self.screen_stack:
             return
         activity_snapshot = team_activity_snapshot(snapshot)
         self.query_one(HomePage).update_view(self._home_view_model(activity_snapshot))
         self.query_one(CoworkersPage).update_view(coworkers_view(snapshot))
+
+    def _schedule_agent_room_team_workspace(
+        self, snapshot: TeamWorkspaceSnapshot
+    ) -> None:
+        if not self._agent_room_connected or self._agent_room_client is None:
+            return
+        self._pending_agent_room_team_snapshot = snapshot
+        current = self._agent_room_team_publish_task
+        if current is not None and not current.done():
+            return
+        self._agent_room_team_publish_task = asyncio.create_task(
+            self._drain_agent_room_team_workspace(), name="agent-room-team-workspace"
+        )
+
+    async def _drain_agent_room_team_workspace(self) -> None:
+        while snapshot := self._pending_agent_room_team_snapshot:
+            self._pending_agent_room_team_snapshot = None
+            service = self._team_workspace_service
+            client = self._agent_room_client
+            if service is None or client is None or not self._agent_room_connected:
+                return
+            run_ids = {run.run_id for run in snapshot.runs}
+            links: dict[str, str] = {}
+            room_snapshot = self._agent_room_snapshot
+            if room_snapshot is not None:
+                for run in room_snapshot.activities:
+                    if run.is_orchestrator:
+                        continue
+                    child_session_id = run.child_session_id or run.tool_call_id
+                    team_run_id = derive_run_id(
+                        snapshot.identity.workspace_id,
+                        service.member_id,
+                        f"managed:{child_session_id}",
+                    )
+                    if team_run_id in run_ids:
+                        links[team_run_id] = run.tool_call_id
+            try:
+                await client.publish_team_workspace(
+                    snapshot, local_member_id=service.member_id, local_agent_links=links
+                )
+            except AgentRoomUnavailable as error:
+                logger.debug(
+                    "Could not publish team workspace to Agent Room: %s", error
+                )
+                return
 
     def _refresh_workspace_pages(self) -> None:
         if not self.screen_stack:
@@ -3101,6 +3215,7 @@ class VibeApp(App):  # noqa: PLR0904
         self,
         prompt: str,
         *,
+        publish_conversation: bool = True,
         title_source: str | None = None,
         prebuilt_images: list[ImageAttachment] | None = None,
         prebuilt_payload: PathPromptPayload | None = None,
@@ -3131,7 +3246,8 @@ class VibeApp(App):  # noqa: PLR0904
                 auto_title = format_session_title(title_segments) or None
             self._narrator_manager.cancel()
             self._narrator_manager.on_turn_start(prompt)
-            self._schedule_team_conversation(ConversationRole.USER, prompt)
+            if publish_conversation:
+                self._schedule_team_conversation(ConversationRole.USER, prompt)
             async with aclosing(
                 self.agent_loop.act(
                     prompt,
@@ -3141,9 +3257,10 @@ class VibeApp(App):  # noqa: PLR0904
                 )
             ) as events:
                 assistant_content = await self._handle_agent_loop_events(events)
-            self._schedule_team_conversation(
-                ConversationRole.ASSISTANT, assistant_content
-            )
+            if publish_conversation:
+                self._schedule_team_conversation(
+                    ConversationRole.ASSISTANT, assistant_content
+                )
             turn_completed = True
         except asyncio.CancelledError:
             await self._handle_turn_error(cancelled=True)

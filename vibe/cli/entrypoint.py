@@ -206,7 +206,7 @@ def _server_port(value: str) -> int:
 def _parse_team_arguments(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog=f"{Path(sys.argv[0]).name} team",
-        description="Join and configure a repository-scoped Vibe team workspace",
+        description="Join or leave a repository-scoped Vibe team workspace",
     )
     subparsers = parser.add_subparsers(dest="team_action", required=True)
     join = subparsers.add_parser(
@@ -224,16 +224,17 @@ def _parse_team_arguments(argv: list[str]) -> argparse.Namespace:
     join.add_argument(
         "--history-limit", type=int, choices=range(1, 201), default=50, metavar="N"
     )
-    join.add_argument(
-        "--activity",
-        choices=["status", "summaries"],
-        default="status",
-        dest="privacy_mode",
-        help="Agent activity detail shared with teammates (default: status)",
-    )
-    join.add_argument("--member-name", default="")
     join.add_argument("--workdir", type=Path, metavar="DIR")
     join.add_argument(
+        "--trust",
+        action="store_true",
+        help="Trust the working directory for this invocation only",
+    )
+    leave = subparsers.add_parser(
+        "leave", help="Disable this team workspace locally without changing the project"
+    )
+    leave.add_argument("--workdir", type=Path, metavar="DIR")
+    leave.add_argument(
         "--trust",
         action="store_true",
         help="Trust the working directory for this invocation only",
@@ -388,8 +389,6 @@ def main() -> None:
 
     _change_to_requested_workdir(args)
 
-    _start_agent_room_server_if_requested(args)
-
     # Must run before `cwd` is read and before run_cli so that session lookups
     # (-c / --resume picker) scope to the worktree directory.
     if args.worktree and not (args.setup or args.check_upgrade):
@@ -440,6 +439,10 @@ def main() -> None:
 
         raise SystemExit(run_team_command(args, cwd))
 
+    if args.server and not args.trust:
+        check_and_resolve_trusted_folder(cwd)
+    _start_agent_room_server_if_requested(args)
+
     resolve_trusted_folder: Callable[[], None] | None = None
     if args.prompt is None and not args.check_upgrade:
 
@@ -463,9 +466,7 @@ def _start_agent_room_server_if_requested(args: argparse.Namespace) -> None:
     rprint("[dim]Starting or finding the shared Agent Room...[/]", file=sys.stderr)
     try:
         url = ensure_agent_room_backend(
-            Path.cwd(),
-            port=args.server_port,
-            network_mode=args.server_network_mode,
+            Path.cwd(), port=args.server_port, network_mode=args.server_network_mode
         )
     except AgentRoomUnavailable as error:
         raise SystemExit(f"Could not start Agent Room: {error}") from error
@@ -473,8 +474,7 @@ def _start_agent_room_server_if_requested(args: argparse.Namespace) -> None:
     os.environ["VIBE_AGENT_ROOM_AUTOSTART"] = "0"
     web_url = f"{url}/web/agent-room/"
     rprint(
-        f"[green]Agent Room ready:[/] [link={web_url}]{web_url}[/link]",
-        file=sys.stderr,
+        f"[green]Agent Room ready:[/] [link={web_url}]{web_url}[/link]", file=sys.stderr
     )
 
 

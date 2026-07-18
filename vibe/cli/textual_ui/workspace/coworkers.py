@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from rich.text import Text
 from textual import events
@@ -50,7 +50,8 @@ class CoworkerViewModel:
 class CoworkersViewModel:
     workspace_name: str = "Team workspace"
     connection_state: str = "disabled"
-    privacy_label: str = "status only"
+    privacy_label: str = "status · no history"
+    sharing_notice: str | None = None
     members: tuple[CoworkerViewModel, ...] = ()
     error: str | None = None
     join_hint: str | None = None
@@ -72,8 +73,10 @@ def _state_presentation(state: AgentRunState) -> tuple[str, str, str]:
             presentation = "×", "failed", "state-failed"
         case AgentRunState.COMPLETED:
             presentation = "✓", "finished", "state-finished"
-        case AgentRunState.CANCELLED | AgentRunState.STOPPED:
+        case AgentRunState.CANCELLED:
             presentation = "○", "cancelled", "state-idle"
+        case AgentRunState.STOPPED:
+            presentation = "■", "stopped", "state-idle"
     return presentation
 
 
@@ -127,16 +130,25 @@ class CoworkersPage(ResponsiveWorkspacePage):
         layout: grid;
         grid-size: 1;
         grid-columns: 1fr;
-        grid-rows: 2 2 1fr;
+        grid-rows: 2 1 1 1fr;
     }
 
     CoworkersPage #coworkers-summary {
-        height: 2;
+        height: 1;
         color: $text-muted;
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
 
         &:ansi {
             text-style: dim;
         }
+    }
+
+    CoworkersPage #coworkers-sharing {
+        height: 1;
+        text-style: bold;
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
     }
 
     CoworkersPage #coworkers-body {
@@ -151,6 +163,8 @@ class CoworkersPage(ResponsiveWorkspacePage):
         margin-right: 2;
         background: transparent;
         border: none;
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
     }
 
     CoworkersPage #coworker-detail {
@@ -172,11 +186,15 @@ class CoworkersPage(ResponsiveWorkspacePage):
     CoworkersPage #coworker-heading {
         height: 2;
         text-style: bold;
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
     }
 
     CoworkersPage #coworker-work {
         height: 3;
         color: $text-muted;
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
 
         &:ansi {
             text-style: dim;
@@ -189,6 +207,8 @@ class CoworkersPage(ResponsiveWorkspacePage):
         min-height: 0;
         background: transparent;
         border: none;
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
     }
 
     CoworkersPage #coworker-activity {
@@ -197,6 +217,8 @@ class CoworkersPage(ResponsiveWorkspacePage):
         min-height: 0;
         overflow-y: auto;
         color: $text-muted;
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
 
         &:ansi {
             text-style: dim;
@@ -257,7 +279,7 @@ class CoworkersPage(ResponsiveWorkspacePage):
     }
     """
 
-    def __init__(self, view: CoworkersViewModel, **kwargs: object) -> None:
+    def __init__(self, view: CoworkersViewModel, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._view = view
         self._selected_member_id = view.members[0].member_id if view.members else None
@@ -272,15 +294,18 @@ class CoworkersPage(ResponsiveWorkspacePage):
         return self._selected_run_id
 
     def compose(self) -> ComposeResult:
-        yield Static("Coworkers", classes="workspace-title")
+        yield Static("Coworker rooms", classes="workspace-title")
         yield Static(_connection_text(self._view), id="coworkers-summary")
+        yield Static(self._view.sharing_notice or "", id="coworkers-sharing")
         with Horizontal(id="coworkers-body"):
             yield NavigableOptionList(*self._member_options(), id="coworkers-list")
             with Vertical(id="coworker-detail"):
                 with Vertical(id="coworker-main-detail"):
                     yield Static(self._heading_text(), id="coworker-heading")
                     yield Static(self._work_text(), id="coworker-work")
-                    yield Static("AGENTS", classes="workspace-section-title")
+                    yield Static(
+                        "AGENTS IN THIS ROOM", classes="workspace-section-title"
+                    )
                     yield NavigableOptionList(
                         *self._agent_options(), id="coworker-agents"
                     )
@@ -304,6 +329,7 @@ class CoworkersPage(ResponsiveWorkspacePage):
             return
 
         self.query_one("#coworkers-summary", Static).update(_connection_text(view))
+        self.query_one("#coworkers-sharing", Static).update(view.sharing_notice or "")
         members = self.query_one("#coworkers-list", NavigableOptionList)
         members.clear_options()
         members.add_options(self._member_options())
@@ -374,9 +400,12 @@ class CoworkersPage(ResponsiveWorkspacePage):
         agents = self.query_one("#coworker-agents", NavigableOptionList)
         agents.clear_options()
         agents.add_options(self._agent_options())
-        run_ids = {agent.run_id for agent in self._selected_agents()}
+        selected_agents = self._selected_agents()
+        run_ids = {agent.run_id for agent in selected_agents}
         if self._selected_run_id not in run_ids:
-            self._selected_run_id = next(iter(run_ids), None)
+            self._selected_run_id = (
+                selected_agents[0].run_id if selected_agents else None
+            )
         if self._selected_run_id is not None:
             agents.highlighted = self._agent_index(self._selected_run_id)
         self.query_one("#coworker-activity", Static).update(self._activity_text())
@@ -406,7 +435,7 @@ class CoworkersPage(ResponsiveWorkspacePage):
     def _agent_options(self) -> tuple[Option, ...]:
         agents = self._selected_agents()
         if not agents:
-            return (Option(Text("○ No active agent runs", style="dim"), id="empty"),)
+            return (Option(Text("○ No agents in this room", style="dim"), id="empty"),)
         options: list[Option] = []
         for agent in agents:
             glyph, state, _style = _state_presentation(agent.state)
@@ -466,7 +495,7 @@ class CoworkersPage(ResponsiveWorkspacePage):
                 style="dim",
             )
         glyph, state, _style = _member_presentation(member)
-        text = Text(member.display_name, style="bold")
+        text = Text(f"{member.display_name}'s room", style="bold")
         text.append(f"  ·  {glyph} {state}", style="bold")
         if member.updated_label:
             text.append(f"  ·  {member.updated_label}", style="dim")
@@ -480,7 +509,7 @@ class CoworkersPage(ResponsiveWorkspacePage):
         text.append(f"\n{member.branch or 'No branch shared'}")
         if member.summary:
             text.append(f"\n{member.summary}", style="dim")
-        elif self._view.privacy_label == "status only":
+        elif self._view.privacy_label.startswith("status"):
             text.append("\nActivity summaries are private", style="dim")
         return text
 
@@ -514,7 +543,7 @@ class CoworkersPage(ResponsiveWorkspacePage):
             text.append(f"\nUpdated {agent.updated_label}", style="dim")
         if agent.summary:
             text.append(f"\n\n{agent.summary}")
-        elif self._view.privacy_label == "status only":
+        elif self._view.privacy_label.startswith("status"):
             text.append("\n\nActivity summary is private", style="dim")
         text.append("\n\nCONVERSATION HISTORY", style="bold")
         if not agent.history:
@@ -525,7 +554,7 @@ class CoworkersPage(ResponsiveWorkspacePage):
             text.append(f"\n{role}", style="bold")
             if entry.updated_label:
                 text.append(f"  {entry.updated_label}", style="dim")
-            text.append(f"\n{entry.text or 'Message shared without content'}")
+            text.append(f"\n{entry.text or 'Content not shared'}")
         return text
 
 

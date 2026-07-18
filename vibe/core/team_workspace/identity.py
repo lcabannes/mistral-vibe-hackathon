@@ -5,12 +5,14 @@ import hashlib
 from pathlib import Path
 import platform
 import re
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 from uuid import uuid4
 
-from git import InvalidGitRepositoryError, Repo
-
 from vibe.core.team_workspace.models import TeamWorkspaceIdentity
+
+if TYPE_CHECKING:
+    from git import Repo
 
 _SCP_REMOTE = re.compile(r"^(?:[^@]+@)?(?P<host>[^:]+):(?P<path>.+)$")
 
@@ -22,7 +24,7 @@ def _opaque_id(prefix: str, *parts: str) -> str:
 
 def normalize_project_remote(remote: str) -> str:
     value = remote.strip().rstrip("/")
-    if match := _SCP_REMOTE.match(value):
+    if "://" not in value and (match := _SCP_REMOTE.match(value)):
         normalized = f"{match.group('host')}/{match.group('path')}"
     else:
         parsed = urlparse(value)
@@ -34,7 +36,18 @@ def normalize_project_remote(remote: str) -> str:
     return normalized.casefold()
 
 
+def canonical_project_label(source: str) -> str:
+    """Return a repository label for URI, POSIX, and Windows-shaped sources."""
+    normalized = source.replace("\\", "/").rstrip("/")
+    label = normalized.rsplit("/", maxsplit=1)[-1]
+    if label.endswith(".git"):
+        label = label[:-4]
+    return label or "Git project"
+
+
 def discover_workspace_identity(project_root: Path) -> TeamWorkspaceIdentity:
+    from git import InvalidGitRepositoryError, Repo
+
     resolved = project_root.expanduser().resolve()
     try:
         repo = Repo(resolved, search_parent_directories=True)
@@ -45,6 +58,7 @@ def discover_workspace_identity(project_root: Path) -> TeamWorkspaceIdentity:
     remote = _preferred_remote(repo)
     if remote:
         source = normalize_project_remote(remote)
+        display_name = canonical_project_label(source)
     else:
         common_dir = Path(repo.git.rev_parse("--git-common-dir"))
         source = str(
@@ -52,10 +66,13 @@ def discover_workspace_identity(project_root: Path) -> TeamWorkspaceIdentity:
             if common_dir.is_absolute()
             else (working_tree / common_dir).resolve()
         )
-    return _identity_from_source(source, working_tree.name or "Git project")
+        display_name = working_tree.name or "Git project"
+    return _identity_from_source(source, display_name)
 
 
 def discover_current_branch(project_root: Path) -> str | None:
+    from git import InvalidGitRepositoryError, Repo
+
     try:
         repo = Repo(project_root.expanduser().resolve(), search_parent_directories=True)
         if repo.head.is_detached:
@@ -69,6 +86,8 @@ def resolve_team_repository_url(project_root: Path, configured: str) -> str | No
     value = configured.strip()
     if value != "origin":
         return value or None
+    from git import InvalidGitRepositoryError, Repo
+
     try:
         repo = Repo(project_root.expanduser().resolve(), search_parent_directories=True)
         urls = list(repo.remote("origin").urls)
@@ -131,6 +150,8 @@ def _git_user_email() -> str:
 
 
 def _git_config_value(key: str) -> str:
+    from git import InvalidGitRepositoryError, Repo
+
     try:
         value = (
             Repo(Path.cwd(), search_parent_directories=True)

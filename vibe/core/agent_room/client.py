@@ -16,6 +16,7 @@ import httpx
 from vibe.core.agent_room.models import AgentRoomRun, AgentRoomSnapshot
 from vibe.core.agents.events import ManagedAgentLifecycleEvent
 from vibe.core.agents.models import ManagedAgentSnapshot
+from vibe.core.team_workspace.models import TeamWorkspaceSnapshot
 from vibe.core.types import LLMUsage
 
 DEFAULT_AGENT_ROOM_URL = "http://127.0.0.1:4173"
@@ -54,11 +55,7 @@ def discover_agent_room() -> str | None:
 
 
 def launch_agent_room_backend(
-    workdir: Path,
-    *,
-    port: int = 4173,
-    network_mode: str = "auto",
-    force: bool = False,
+    workdir: Path, *, port: int = 4173, network_mode: str = "auto", force: bool = False
 ) -> bool:
     if not force and os.environ.get("VIBE_AGENT_ROOM_AUTOSTART", "1") == "0":
         return False
@@ -185,7 +182,7 @@ class AgentRoomClient:
     async def refresh(self) -> AgentRoomSnapshot:
         payload = await self._request("GET", "/api/agent-runs")
         try:
-            snapshot = AgentRoomSnapshot.model_validate(payload)
+            snapshot = AgentRoomSnapshot.model_validate_json(json.dumps(payload))
         except ValueError as error:
             raise AgentRoomUnavailable(
                 f"Invalid Agent Room snapshot: {error}"
@@ -196,6 +193,7 @@ class AgentRoomClient:
             or snapshot.instance_id != self._snapshot.instance_id
             or snapshot.revision != self._snapshot.revision
             or snapshot.activities != self._snapshot.activities
+            or snapshot.team_workspace != self._snapshot.team_workspace
         )
         self._snapshot = snapshot
         if changed:
@@ -284,6 +282,23 @@ class AgentRoomClient:
             {"answers": answers},
         )
         await self.refresh()
+
+    async def publish_team_workspace(
+        self,
+        snapshot: TeamWorkspaceSnapshot,
+        *,
+        local_member_id: str,
+        local_agent_links: dict[str, str] | None = None,
+    ) -> None:
+        await self._request(
+            "POST",
+            "/api/team-workspace",
+            {
+                "snapshot": snapshot.model_dump(mode="json"),
+                "local_member_id": local_member_id,
+                "local_agent_links": local_agent_links or {},
+            },
+        )
 
     async def subscribe_events(
         self,

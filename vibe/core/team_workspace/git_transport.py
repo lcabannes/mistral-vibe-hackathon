@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 import os
 from pathlib import Path
@@ -27,6 +29,7 @@ class GitTeamWorkspaceTransport:
         branch: str = "vibe-team-demo",
         max_retries: int = 3,
         timeout_seconds: float = 20.0,
+        publication_guard: Callable[[], AbstractContextManager[None]] | None = None,
     ) -> None:
         if not remote_url.strip():
             raise ValueError("remote_url must not be empty")
@@ -39,6 +42,7 @@ class GitTeamWorkspaceTransport:
         self.branch = branch.strip()
         self.max_retries = max_retries
         self.timeout_seconds = timeout_seconds
+        self._publication_guard = publication_guard or nullcontext
         self._prepared = False
 
     @property
@@ -72,24 +76,96 @@ class GitTeamWorkspaceTransport:
         self._run("checkout", "--orphan", self.branch, cwd=self.checkout_dir)
         self._prepared = True
 
-    def sync(self) -> GitSyncResult:
+    def sync(
+        self, *, validate_publication: Callable[[], None] | None = None
+    ) -> GitSyncResult:
         self.prepare()
         self._commit_local_changes()
         remote_exists = self._remote_branch_exists()
         for _attempt in range(self.max_retries):
             if remote_exists:
                 self._fetch_and_rebase()
-            push = self._run_result(
-                "push",
-                "--set-upstream",
-                "origin",
-                f"HEAD:refs/heads/{self.branch}",
-                cwd=self.checkout_dir,
-            )
+            push = self._push_current_revision(validate_publication)
             if push.returncode == 0:
                 return GitSyncResult(pushed=True, remote_branch_exists=remote_exists)
             remote_exists = True
         raise GitTeamWorkspaceError("Git push retries exhausted")
+
+    def publish_sensitive(
+        self,
+        *,
+        validate_policy: Callable[[], None],
+        write_sensitive: Callable[[], None],
+    ) -> GitSyncResult:
+        """Publish sensitive state only while the fetched remote policy permits it."""
+        self.prepare()
+        if not self._remote_branch_exists():
+            raise GitTeamWorkspaceError("team workspace branch is unavailable")
+
+        for _attempt in range(self.max_retries):
+            remote_ref = self._fetch_remote_ref()
+            self._run("reset", "--hard", remote_ref, cwd=self.checkout_dir)
+            clean_revision = self.current_revision()
+            if clean_revision is None:
+                raise GitTeamWorkspaceError("team workspace branch is unavailable")
+            try:
+                validate_policy()
+                write_sensitive()
+                self._commit_local_changes()
+                push = self._push_current_revision(validate_policy)
+            except Exception:
+                self._run("reset", "--hard", clean_revision, cwd=self.checkout_dir)
+                raise
+            if push.returncode == 0:
+                return GitSyncResult(pushed=True, remote_branch_exists=True)
+            self._run("reset", "--hard", clean_revision, cwd=self.checkout_dir)
+
+        raise GitTeamWorkspaceError("Git push retries exhausted")
+
+    def publish_policy_tightening(
+        self,
+        *,
+        apply_policy: Callable[[], None],
+        validate_publication: Callable[[], None] | None = None,
+    ) -> GitSyncResult:
+        """Apply a restrictive policy to each freshly fetched remote revision."""
+        self.prepare()
+        if not self._remote_branch_exists():
+            raise GitTeamWorkspaceError("team workspace branch is unavailable")
+
+        for _attempt in range(self.max_retries):
+            remote_ref = self._fetch_remote_ref()
+            self._run("reset", "--hard", remote_ref, cwd=self.checkout_dir)
+            clean_revision = self.current_revision()
+            if clean_revision is None:
+                raise GitTeamWorkspaceError("team workspace branch is unavailable")
+            try:
+                apply_policy()
+                self._commit_local_changes()
+                push = self._push_current_revision(validate_publication)
+            except Exception:
+                self._run("reset", "--hard", clean_revision, cwd=self.checkout_dir)
+                raise
+            if push.returncode == 0:
+                return GitSyncResult(pushed=True, remote_branch_exists=True)
+            self._run("reset", "--hard", clean_revision, cwd=self.checkout_dir)
+
+        raise GitTeamWorkspaceError("Git push retries exhausted")
+
+    def hydrate(self) -> None:
+        """Materialize an existing team branch into a new empty checkout."""
+        self.prepare()
+        if self.materialization_root.exists() or not self._remote_branch_exists():
+            return
+        remote_ref = self._fetch_remote_ref()
+        self._run("reset", "--hard", remote_ref, cwd=self.checkout_dir)
+
+    def current_revision(self) -> str | None:
+        self.prepare()
+        result = self._run_result(
+            "rev-parse", "--verify", "HEAD", cwd=self.checkout_dir
+        )
+        return result.stdout.strip() if result.returncode == 0 else None
 
     def _validate_existing_checkout(self) -> None:
         remote = self._run("remote", "get-url", "origin", cwd=self.checkout_dir).strip()
@@ -124,6 +200,14 @@ class GitTeamWorkspaceTransport:
         return result.returncode == 0
 
     def _fetch_and_rebase(self) -> None:
+        remote_ref = self._fetch_remote_ref()
+        rebase = self._run_result("rebase", remote_ref, cwd=self.checkout_dir)
+        if rebase.returncode == 0:
+            return
+        self._run_result("rebase", "--abort", cwd=self.checkout_dir)
+        raise GitTeamWorkspaceError("team workspace rebase conflicted")
+
+    def _fetch_remote_ref(self) -> str:
         remote_ref = f"refs/remotes/origin/{self.branch}"
         result = self._run_result(
             "fetch",
@@ -133,11 +217,21 @@ class GitTeamWorkspaceTransport:
         )
         if result.returncode != 0:
             raise GitTeamWorkspaceError("failed to fetch team workspace")
-        rebase = self._run_result("rebase", remote_ref, cwd=self.checkout_dir)
-        if rebase.returncode == 0:
-            return
-        self._run_result("rebase", "--abort", cwd=self.checkout_dir)
-        raise GitTeamWorkspaceError("team workspace rebase conflicted")
+        return remote_ref
+
+    def _push_current_revision(
+        self, validate_publication: Callable[[], None] | None
+    ) -> subprocess.CompletedProcess[str]:
+        with self._publication_guard():
+            if validate_publication is not None:
+                validate_publication()
+            return self._run_result(
+                "push",
+                "--set-upstream",
+                "origin",
+                f"HEAD:refs/heads/{self.branch}",
+                cwd=self.checkout_dir,
+            )
 
     def _run(self, *args: str, cwd: Path) -> str:
         result = self._run_result(*args, cwd=cwd)

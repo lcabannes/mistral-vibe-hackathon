@@ -11,6 +11,7 @@ from vibe.core.agent_room.models import (
     AgentRoomConversationMessage,
     AgentRoomRun,
     AgentRoomSnapshot,
+    AgentRoomTeamWorkspace,
 )
 
 __all__ = [
@@ -18,6 +19,7 @@ __all__ = [
     "AgentRoomConversationMessage",
     "AgentRoomRun",
     "AgentRoomSnapshot",
+    "AgentRoomTeamWorkspace",
     "AgentRoomUnavailable",
     "discover_agent_room",
     "ensure_agent_room_backend",

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+import threading
 
 import pytest
 
@@ -166,6 +168,46 @@ async def test_duplicate_intermediate_state_is_coalesced(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
+async def test_concurrent_duplicate_activity_rechecks_under_service_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = _service(tmp_path, member="a", client="a")
+    started = threading.Event()
+    release = threading.Event()
+    try:
+        await service.start()
+        store = service._store
+        assert store is not None
+        write_event = store.write_event
+
+        def slow_write(event) -> None:
+            started.set()
+            assert release.wait(timeout=5)
+            write_event(event)
+
+        monkeypatch.setattr(store, "write_event", slow_write)
+        calls = [
+            asyncio.create_task(
+                service.publish_activity(
+                    local_run_id="primary",
+                    agent_name="default",
+                    agent_display_name="Default",
+                    state=ActivityState.WORKING,
+                )
+            )
+            for _ in range(40)
+        ]
+        assert await asyncio.to_thread(started.wait, 2)
+        release.set()
+        await asyncio.gather(*calls)
+
+        assert len(list((store.workspace_dir / "events").rglob("*.json"))) == 1
+    finally:
+        release.set()
+        await service.stop()
+
+
+@pytest.mark.asyncio
 async def test_bad_shared_root_degrades_without_raising(tmp_path: Path) -> None:
     shared_root = tmp_path / "not-a-directory"
     shared_root.write_text("occupied", encoding="utf-8")
@@ -224,10 +266,9 @@ async def test_all_shared_filesystem_io_is_offloaded(
         await service.stop()
 
     assert calls == [
-        "initialize",
-        "write_presence",
+        "_write_local_publication",
         "read_snapshot",
-        "write_event",
+        "_write_local_publication",
         "read_snapshot",
         "read_snapshot",
     ]

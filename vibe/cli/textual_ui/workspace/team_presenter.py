@@ -17,6 +17,7 @@ from vibe.core.team_workspace import (
     ActivityState,
     ActivitySummary,
     ConnectionState,
+    HistoryScope,
     PresenceState,
     PrivacyMode,
     TeamMemberSnapshot,
@@ -30,7 +31,7 @@ _ACTIVE_STATES = frozenset({
     ActivityState.WORKING,
     ActivityState.ATTENTION,
 })
-_NOW_SECONDS = 5
+_NOW_THRESHOLD_SECONDS = 5
 _SECONDS_PER_MINUTE = 60
 _MINUTES_PER_HOUR = 60
 _HOURS_PER_DAY = 24
@@ -65,7 +66,7 @@ def _summary_label(summary: ActivitySummary | None) -> str:
 
 def _age_label(age: timedelta) -> str:
     seconds = max(0, int(age.total_seconds()))
-    if seconds < _NOW_SECONDS:
+    if seconds < _NOW_THRESHOLD_SECONDS:
         return "now"
     if seconds < _SECONDS_PER_MINUTE:
         return f"{seconds}s ago"
@@ -84,6 +85,20 @@ def _member_presence(member: TeamMemberSnapshot, connection: ConnectionState) ->
     if connection is ConnectionState.DEGRADED:
         return "stale"
     return "online"
+
+
+def _privacy_label(snapshot: TeamWorkspaceSnapshot) -> str:
+    activity = (
+        "summaries" if snapshot.privacy_mode is PrivacyMode.SUMMARIES else "status"
+    )
+    match snapshot.history_scope:
+        case HistoryScope.MESSAGES:
+            history = "messages"
+        case HistoryScope.MARKERS:
+            history = "markers"
+        case HistoryScope.STATUS:
+            history = "no history"
+    return f"{activity} · {history}"
 
 
 def _run_sort_key(run: TeamRunSnapshot) -> tuple[int, float, str]:
@@ -163,11 +178,8 @@ def coworkers_view(snapshot: TeamWorkspaceSnapshot) -> CoworkersViewModel:
     return CoworkersViewModel(
         workspace_name=snapshot.identity.display_name,
         connection_state=snapshot.connection_state.value,
-        privacy_label=(
-            "summaries shared"
-            if snapshot.privacy_mode is PrivacyMode.SUMMARIES
-            else "status only"
-        ),
+        privacy_label=_privacy_label(snapshot),
+        sharing_notice=_sharing_notice(snapshot),
         members=tuple(members),
         error=snapshot.error.value.replace("_", " ") if snapshot.error else None,
         join_hint=(
@@ -176,6 +188,16 @@ def coworkers_view(snapshot: TeamWorkspaceSnapshot) -> CoworkersViewModel:
             else None
         ),
     )
+
+
+def _sharing_notice(snapshot: TeamWorkspaceSnapshot) -> str | None:
+    if snapshot.history_scope is not HistoryScope.MESSAGES:
+        return None
+    if snapshot.connection_state is ConnectionState.CONNECTED:
+        return "Messages on; stop: vibe team leave"
+    if snapshot.connection_state is ConnectionState.DISABLED:
+        return "Messages stopped locally via vibe team leave"
+    return "Messages paused; stop: vibe team leave"
 
 
 def team_activity_snapshot(snapshot: TeamWorkspaceSnapshot) -> AgentActivitySnapshot:

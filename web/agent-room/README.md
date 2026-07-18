@@ -1,6 +1,7 @@
 # Vibe Agent Room
 
-Local web control room for persistent Mistral Vibe agents.
+Local web control room for persistent Mistral Vibe agents and Git-synchronized
+coworker rooms.
 
 ```bash
 uv run vibe --server --workdir /path/to/integration-worktree
@@ -17,6 +18,12 @@ worktrees, and lifecycle state. A source-checkout CLI discovers the owner via
 server in the background. Set `VIBE_AGENT_ROOM_URL` to use another loopback
 port, or `VIBE_AGENT_ROOM_AUTOSTART=0` to require manual startup. Only one
 backend may own a `VIBE_HOME` at a time.
+
+When the trusted project contains `.vibe/team.toml`, the CLI publishes its
+validated, privacy-filtered team snapshot to the loopback backend. The browser
+renders one immutable room per coworker. Local cats retain chat, stop, approval,
+and merge controls; synchronized coworker cats are read-only. Team transport is
+the configured Git branch, never a remotely exposed HTTP endpoint.
 
 Each cat is a real Vibe process with a durable conversation, FIFO prompt queue,
 tool approvals, user questions, token/cost/context metrics, and its own Git

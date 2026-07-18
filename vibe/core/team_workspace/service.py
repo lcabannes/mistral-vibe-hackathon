@@ -49,6 +49,10 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+class _TeamWorkspaceLocallyDisabled(Exception):
+    pass
+
+
 @dataclass(frozen=True, slots=True)
 class LocalTeamClient:
     member_id: str
@@ -68,6 +72,7 @@ class TeamWorkspaceBuildOptions(TypedDict, total=False):
     team_repository_url: str
     team_branch: str
     cache_root: Path | None
+    respect_local_leave: bool
     clock: Clock
 
 
@@ -83,6 +88,7 @@ class _ResolvedBuildOptions:
     team_repository_url: str
     team_branch: str
     cache_root: Path | None
+    respect_local_leave: bool
     clock: Clock
 
     @classmethod
@@ -98,6 +104,7 @@ class _ResolvedBuildOptions:
             team_repository_url=options.get("team_repository_url", ""),
             team_branch=options.get("team_branch", "vibe-team-demo"),
             cache_root=options.get("cache_root"),
+            respect_local_leave=options.get("respect_local_leave", True),
             clock=options.get("clock", _utc_now),
         )
 
@@ -114,11 +121,19 @@ class TeamWorkspaceService:
         store: SharedTeamWorkspaceStore | None,
         transport: GitTeamWorkspaceTransport | None = None,
         enabled: bool = True,
+        runtime_enabled_check: Callable[[], bool] | None = None,
         clock: Clock = _utc_now,
     ) -> None:
         if heartbeat_interval_seconds <= 0:
             raise ValueError("heartbeat_interval_seconds must be positive")
-        self.enabled = enabled
+        self._configured_enabled = enabled
+        self._locally_disabled = False
+        self._runtime_enabled_check = runtime_enabled_check
+        from vibe.core.config.team_metadata import team_workspace_lock_for_id
+
+        self._publication_guard = lambda: team_workspace_lock_for_id(
+            identity.workspace_id
+        )
         self.identity = identity
         self.privacy_mode = privacy_mode
         self.history_scope = history_scope
@@ -145,6 +160,10 @@ class TeamWorkspaceService:
         )
 
     @property
+    def enabled(self) -> bool:
+        return self._configured_enabled and not self._locally_disabled
+
+    @property
     def snapshot(self) -> TeamWorkspaceSnapshot:
         return self._snapshot
 
@@ -157,7 +176,7 @@ class TeamWorkspaceService:
             self._listeners.remove(listener)
 
     async def start(self) -> TeamWorkspaceSnapshot:
-        if self._started or not self.enabled:
+        if self._started or not self._configured_enabled:
             return self._snapshot
         if self._store is None:
             self._replace_snapshot(
@@ -191,10 +210,15 @@ class TeamWorkspaceService:
                 await task
 
     async def refresh(self) -> TeamWorkspaceSnapshot:
-        if not self.enabled or self._store is None:
+        if not self._configured_enabled or self._store is None:
             return self._snapshot
         async with self._io_lock:
-            transport_failed = not await self._sync_transport()
+            if not await self._refresh_runtime_enabled():
+                return self._snapshot
+            sync_result = await self._sync_transport()
+            if sync_result is None:
+                return self._snapshot
+            transport_failed = not sync_result
             try:
                 snapshot = await asyncio.to_thread(
                     self._store.read_snapshot, self._clock()
@@ -217,17 +241,19 @@ class TeamWorkspaceService:
         state: ActivityState,
         summary: ActivitySummary | None = None,
     ) -> TeamWorkspaceSnapshot:
-        if not self.enabled or self._store is None:
+        store = self._store
+        if not self._configured_enabled or store is None:
             return self._snapshot
         if not self._started:
             await self.start()
         safe_summary = summary if self.privacy_mode is PrivacyMode.SUMMARIES else None
         signature = (agent_name, agent_display_name, state, safe_summary)
         run_id = derive_run_id(self.identity.workspace_id, self.member_id, local_run_id)
-        if self._last_activity.get(run_id) == signature:
-            return self._snapshot
-
         async with self._io_lock:
+            if not await self._refresh_runtime_enabled():
+                return self._snapshot
+            if self._last_activity.get(run_id) == signature:
+                return self._snapshot
             self._sequence += 1
             event = TeamActivityEvent(
                 workspace_id=self.identity.workspace_id,
@@ -244,19 +270,33 @@ class TeamWorkspaceService:
                 summary=safe_summary,
                 occurred_at=self._clock(),
             )
+            sync_result: bool | None = True
+            transport_failed = False
             try:
-                await asyncio.to_thread(self._store.write_event, event)
+                if self._transport is None:
+                    await asyncio.to_thread(
+                        self._write_local_publication, lambda: store.write_event(event)
+                    )
+                else:
+                    await asyncio.to_thread(store.write_event, event)
                 self._last_activity[run_id] = signature
-                transport_failed = not await self._sync_transport()
-                snapshot = await asyncio.to_thread(
-                    self._store.read_snapshot, self._clock()
-                )
+                sync_result = await self._sync_transport()
+                if sync_result is None:
+                    snapshot = self._snapshot
+                else:
+                    transport_failed = not sync_result
+                    snapshot = await asyncio.to_thread(
+                        store.read_snapshot, self._clock()
+                    )
+            except _TeamWorkspaceLocallyDisabled:
+                self._mark_locally_disabled()
+                snapshot = self._snapshot
             except (OSError, TeamWorkspaceStoreError):
                 snapshot = self._empty_snapshot(
                     ConnectionState.DEGRADED, SyncError.WRITE_FAILED
                 )
             else:
-                if transport_failed:
+                if sync_result is not None and transport_failed:
                     snapshot = self._with_transport_error(snapshot)
             self._replace_snapshot(snapshot)
             return snapshot
@@ -264,15 +304,30 @@ class TeamWorkspaceService:
     async def publish_conversation(
         self, *, local_run_id: str, role: ConversationRole, text: str
     ) -> TeamWorkspaceSnapshot:
+        store = self._store
         if (
-            not self.enabled
-            or self._store is None
+            not self._configured_enabled
+            or store is None
             or self.history_scope is HistoryScope.STATUS
         ):
             return self._snapshot
         if not self._started:
             await self.start()
         async with self._io_lock:
+            if not await self._refresh_runtime_enabled():
+                return self._snapshot
+            transport = self._transport
+            if transport is not None:
+                sync_result = await self._sync_transport()
+                if sync_result is None:
+                    return self._snapshot
+                if not sync_result:
+                    snapshot = self._empty_snapshot(
+                        ConnectionState.DEGRADED, SyncError.TRANSPORT_FAILED
+                    )
+                    self._replace_snapshot(snapshot)
+                    return snapshot
+
             self._sequence += 1
             run_id = derive_run_id(
                 self.identity.workspace_id, self.member_id, local_run_id
@@ -290,18 +345,31 @@ class TeamWorkspaceService:
                 occurred_at=self._clock(),
             )
             try:
-                await asyncio.to_thread(self._store.write_conversation, entry)
-                transport_failed = not await self._sync_transport()
-                snapshot = await asyncio.to_thread(
-                    self._store.read_snapshot, self._clock()
+                if transport is None:
+                    await asyncio.to_thread(
+                        self._write_local_publication,
+                        lambda: store.write_conversation(entry),
+                    )
+                else:
+                    await asyncio.to_thread(
+                        transport.publish_sensitive,
+                        validate_policy=self._validate_conversation_publication,
+                        write_sensitive=lambda: store.write_conversation(entry),
+                    )
+                snapshot = await asyncio.to_thread(store.read_snapshot, self._clock())
+            except _TeamWorkspaceLocallyDisabled:
+                self._mark_locally_disabled()
+                snapshot = self._snapshot
+            except TeamWorkspaceStoreError as error:
+                snapshot = self._empty_snapshot(ConnectionState.DEGRADED, error.code)
+            except GitTeamWorkspaceError:
+                snapshot = self._empty_snapshot(
+                    ConnectionState.DEGRADED, SyncError.TRANSPORT_FAILED
                 )
-            except (OSError, TeamWorkspaceStoreError):
+            except OSError:
                 snapshot = self._empty_snapshot(
                     ConnectionState.DEGRADED, SyncError.WRITE_FAILED
                 )
-            else:
-                if transport_failed:
-                    snapshot = self._with_transport_error(snapshot)
             self._replace_snapshot(snapshot)
             return snapshot
 
@@ -324,9 +392,12 @@ class TeamWorkspaceService:
                 )
 
     async def _heartbeat_and_refresh(self) -> None:
-        if not self.enabled or self._store is None:
+        store = self._store
+        if not self._configured_enabled or store is None:
             return
         async with self._io_lock:
+            if not await self._refresh_runtime_enabled():
+                return
             self._presence_revision += 1
             now = self._clock()
             presence = TeamMemberPresence(
@@ -338,23 +409,104 @@ class TeamWorkspaceService:
                 revision=self._presence_revision,
                 last_seen_at=now,
             )
+            sync_result: bool | None = True
+            transport_failed = False
             try:
-                if self._transport is not None:
-                    await asyncio.to_thread(self._transport.prepare)
-                await asyncio.to_thread(self._store.initialize, now)
-                await asyncio.to_thread(self._store.write_presence, presence)
-                transport_failed = not await self._sync_transport()
-                snapshot = await asyncio.to_thread(self._store.read_snapshot, now)
+                if self._transport is None:
+                    await asyncio.to_thread(
+                        self._write_local_publication,
+                        lambda: self._initialize_and_write_presence(
+                            store, now, presence
+                        ),
+                    )
+                else:
+                    await asyncio.to_thread(self._transport.hydrate)
+                    needs_tightening = await asyncio.to_thread(
+                        store.needs_history_scope_tightening
+                    )
+                    if needs_tightening:
+                        await asyncio.to_thread(
+                            self._transport.publish_policy_tightening,
+                            apply_policy=lambda: store.initialize(now),
+                            validate_publication=self._validate_runtime_publication,
+                        )
+                    await asyncio.to_thread(store.initialize, now)
+                    await asyncio.to_thread(store.write_presence, presence)
+                sync_result = await self._sync_transport()
+                if sync_result is None:
+                    snapshot = self._snapshot
+                else:
+                    transport_failed = not sync_result
+                    snapshot = await asyncio.to_thread(store.read_snapshot, now)
+            except _TeamWorkspaceLocallyDisabled:
+                self._mark_locally_disabled()
+                snapshot = self._snapshot
             except TeamWorkspaceStoreError as error:
                 snapshot = self._empty_snapshot(ConnectionState.DEGRADED, error.code)
+            except GitTeamWorkspaceError:
+                snapshot = self._empty_snapshot(
+                    ConnectionState.DEGRADED, SyncError.TRANSPORT_FAILED
+                )
             except OSError:
                 snapshot = self._empty_snapshot(
                     ConnectionState.DEGRADED, SyncError.WRITE_FAILED
                 )
             else:
-                if transport_failed:
+                if sync_result is not None and transport_failed:
                     snapshot = self._with_transport_error(snapshot)
             self._replace_snapshot(snapshot)
+
+    async def _refresh_runtime_enabled(self) -> bool:
+        runtime_enabled = True
+        if self._runtime_enabled_check is not None:
+            try:
+                runtime_enabled = await asyncio.to_thread(self._runtime_enabled_check)
+            except OSError:
+                runtime_enabled = False
+        if runtime_enabled:
+            if self._locally_disabled:
+                self._locally_disabled = False
+                self._replace_snapshot(
+                    self._empty_snapshot(ConnectionState.DISCONNECTED)
+                )
+            return True
+        self._mark_locally_disabled()
+        return False
+
+    def _validate_conversation_publication(self) -> None:
+        self._validate_runtime_publication()
+        store = self._store
+        if store is None:
+            raise TeamWorkspaceStoreError(SyncError.WRITE_FAILED)
+        store.validate_conversation_policy()
+
+    def _validate_runtime_publication(self) -> None:
+        if self._runtime_enabled_check is not None:
+            try:
+                runtime_enabled = self._runtime_enabled_check()
+            except OSError as error:
+                raise _TeamWorkspaceLocallyDisabled from error
+            if not runtime_enabled:
+                raise _TeamWorkspaceLocallyDisabled
+
+    def _write_local_publication(self, write: Callable[[], None]) -> None:
+        with self._publication_guard():
+            self._validate_runtime_publication()
+            write()
+
+    @staticmethod
+    def _initialize_and_write_presence(
+        store: SharedTeamWorkspaceStore, now: datetime, presence: TeamMemberPresence
+    ) -> None:
+        store.initialize(now)
+        store.write_presence(presence)
+
+    def _mark_locally_disabled(self) -> None:
+        if self._locally_disabled:
+            return
+        self._locally_disabled = True
+        self._last_activity.clear()
+        self._replace_snapshot(self._empty_snapshot(ConnectionState.DISABLED))
 
     def _replace_snapshot(self, snapshot: TeamWorkspaceSnapshot) -> None:
         if snapshot == self._snapshot:
@@ -376,13 +528,19 @@ class TeamWorkspaceService:
             error=error,
         )
 
-    async def _sync_transport(self) -> bool:
+    async def _sync_transport(self) -> bool | None:
         if self._transport is None:
             return True
         try:
-            await asyncio.to_thread(self._transport.sync)
+            await asyncio.to_thread(
+                self._transport.sync,
+                validate_publication=self._validate_runtime_publication,
+            )
             return True
-        except GitTeamWorkspaceError:
+        except _TeamWorkspaceLocallyDisabled:
+            self._mark_locally_disabled()
+            return None
+        except (GitTeamWorkspaceError, OSError):
             return False
 
     @staticmethod
@@ -404,6 +562,16 @@ def build_team_workspace_service(
 ) -> TeamWorkspaceService:
     settings = _ResolvedBuildOptions.resolve(options)
     identity = discover_workspace_identity(project_root)
+    from vibe.core.config.team_metadata import team_workspace_lock_for_id
+
+    publication_guard = lambda: team_workspace_lock_for_id(identity.workspace_id)
+    runtime_enabled_check: Callable[[], bool] | None = None
+    if settings.respect_local_leave:
+        from vibe.core.config.team_metadata import is_team_workspace_left_id
+
+        runtime_enabled_check = lambda: (
+            not is_team_workspace_left_id(identity.workspace_id)
+        )
     member_id, display_name = resolve_member_identity(
         identity.workspace_id, settings.member_name, settings.identity_hint
     )
@@ -424,6 +592,7 @@ def build_team_workspace_service(
                 remote_url=resolved_team_remote,
                 checkout_dir=base / identity.workspace_id / client_id / "repo",
                 branch=settings.team_branch,
+                publication_guard=publication_guard,
             )
             materialization_root = transport.materialization_root
         else:
@@ -459,5 +628,6 @@ def build_team_workspace_service(
         store=store,
         transport=transport,
         enabled=configured,
+        runtime_enabled_check=runtime_enabled_check,
         clock=settings.clock,
     )

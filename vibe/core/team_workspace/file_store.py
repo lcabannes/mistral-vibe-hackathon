@@ -30,6 +30,11 @@ from vibe.core.utils.io import read_safe
 DEFAULT_MAX_FILE_BYTES = 64 * 1024
 DEFAULT_MAX_EVENT_FILES = 2_000
 _MANIFEST_CREATED_AT = datetime(1970, 1, 1, tzinfo=UTC)
+_HISTORY_SCOPE_RANK = {
+    HistoryScope.STATUS: 0,
+    HistoryScope.MARKERS: 1,
+    HistoryScope.MESSAGES: 2,
+}
 
 
 class TeamWorkspaceStoreError(Exception):
@@ -94,16 +99,22 @@ class SharedTeamWorkspaceStore:
             existing = self._read_model(
                 self.manifest_path, TeamWorkspaceManifest, required=True
             )
-            if (
-                existing is None
-                or existing.identity != self.identity
-                or existing.privacy_mode is not self.privacy_mode
-                or existing.history_scope is not self.history_scope
-                or existing.history_limit != self.history_limit
-            ):
+            if existing is not None and self._can_tighten_history_scope(existing):
+                self._atomic_write(self.manifest_path, manifest)
+                self._delete_record_tree(self.workspace_dir / "conversations")
+                return
+            if existing != manifest:
                 raise TeamWorkspaceStoreError(SyncError.MANIFEST_MISMATCH)
             return
         self._atomic_write(self.manifest_path, manifest)
+
+    def needs_history_scope_tightening(self) -> bool:
+        if not self.manifest_path.exists():
+            return False
+        existing = self._read_model(
+            self.manifest_path, TeamWorkspaceManifest, required=True
+        )
+        return existing is not None and self._can_tighten_history_scope(existing)
 
     def write_presence(self, presence: TeamMemberPresence) -> None:
         self._require_local_owner(presence.member_id, presence.client_id)
@@ -119,6 +130,16 @@ class SharedTeamWorkspaceStore:
 
     def write_event(self, event: TeamActivityEvent) -> None:
         self._require_local_owner(event.member_id, event.client_id)
+        stored, _ = self._load_event_files()
+        start_candidates = [
+            item.started_at or item.occurred_at
+            for _, item in stored
+            if item.run_id == event.run_id
+            and item.member_id == event.member_id
+            and item.client_id == event.client_id
+        ]
+        start_candidates.append(event.started_at or event.occurred_at)
+        event = event.model_copy(update={"started_at": min(start_candidates)})
         filename = f"{event.sequence:020d}-{event.event_id}.json"
         path = (
             self.workspace_dir / "events" / event.member_id / event.client_id / filename
@@ -129,9 +150,11 @@ class SharedTeamWorkspaceStore:
                 raise TeamWorkspaceStoreError(SyncError.WRITE_FAILED)
             return
         self._atomic_write(path, event)
+        self._compact_event_files()
 
     def write_conversation(self, entry: TeamConversationEntry) -> None:
         self._require_local_owner(entry.member_id, entry.client_id)
+        self.validate_conversation_policy()
         filename = f"{entry.sequence:020d}-{entry.entry_id}.json"
         path = (
             self.workspace_dir
@@ -146,6 +169,20 @@ class SharedTeamWorkspaceStore:
                 raise TeamWorkspaceStoreError(SyncError.WRITE_FAILED)
             return
         self._atomic_write(path, entry)
+        self._compact_conversation_files()
+
+    def validate_conversation_policy(self) -> None:
+        manifest = self._read_model(
+            self.manifest_path, TeamWorkspaceManifest, required=True
+        )
+        if (
+            manifest is None
+            or manifest.identity != self.identity
+            or manifest.privacy_mode is not self.privacy_mode
+            or manifest.history_scope is not self.history_scope
+            or manifest.history_limit != self.history_limit
+        ):
+            raise TeamWorkspaceStoreError(SyncError.MANIFEST_MISMATCH)
 
     def read_snapshot(self, now: datetime) -> TeamWorkspaceSnapshot:
         degraded = False
@@ -212,16 +249,59 @@ class SharedTeamWorkspaceStore:
     def _read_conversations(self) -> tuple[list[TeamConversationEntry], bool]:
         if self.history_scope is HistoryScope.STATUS:
             return [], False
-        records: list[TeamConversationEntry] = []
+        stored, degraded = self._load_conversation_files()
+        selected = self._select_bounded_records(stored)
+        return [record for _, record in selected], degraded or len(stored) > len(
+            selected
+        )
+
+    def _read_events(self) -> tuple[list[TeamActivityEvent], bool]:
+        stored, degraded = self._load_event_files()
+        current = self._current_event_files(stored)
+        selected = self._select_bounded_records(current)
+        return [record for _, record in selected], degraded or len(current) > len(
+            selected
+        )
+
+    def _load_event_files(self) -> tuple[list[tuple[Path, TeamActivityEvent]], bool]:
+        stored: list[tuple[Path, TeamActivityEvent]] = []
         degraded = False
-        seen = 0
+        root = self.workspace_dir / "events"
+        for member_dir in self._child_directories(root):
+            for client_dir in self._child_directories(member_dir):
+                for path in self._json_files(client_dir):
+                    try:
+                        record = self._read_model(
+                            path, TeamActivityEvent, required=True
+                        )
+                    except TeamWorkspaceStoreError:
+                        degraded = True
+                        continue
+                    if record is None:
+                        degraded = True
+                        continue
+                    expected = f"{record.sequence:020d}-{record.event_id}.json"
+                    if (
+                        record.workspace_id != self.identity.workspace_id
+                        or record.member_id != member_dir.name
+                        or record.client_id != client_dir.name
+                        or record.privacy_mode is not self.privacy_mode
+                        or path.name != expected
+                    ):
+                        degraded = True
+                        continue
+                    stored.append((path, record))
+        return stored, degraded
+
+    def _load_conversation_files(
+        self,
+    ) -> tuple[list[tuple[Path, TeamConversationEntry]], bool]:
+        stored: list[tuple[Path, TeamConversationEntry]] = []
+        degraded = False
         root = self.workspace_dir / "conversations"
         for member_dir in self._child_directories(root):
             for client_dir in self._child_directories(member_dir):
                 for path in self._json_files(client_dir):
-                    if seen >= self.max_event_files:
-                        return records, True
-                    seen += 1
                     try:
                         record = self._read_model(
                             path, TeamConversationEntry, required=True
@@ -242,42 +322,130 @@ class SharedTeamWorkspaceStore:
                     ):
                         degraded = True
                         continue
-                    records.append(record)
-        return records, degraded
+                    stored.append((path, record))
+        return stored, degraded
 
-    def _read_events(self) -> tuple[list[TeamActivityEvent], bool]:
-        records: list[TeamActivityEvent] = []
-        degraded = False
-        seen = 0
-        events_root = self.workspace_dir / "events"
-        for member_dir in self._child_directories(events_root):
+    @staticmethod
+    def _current_event_files(
+        stored: list[tuple[Path, TeamActivityEvent]],
+    ) -> list[tuple[Path, TeamActivityEvent]]:
+        current: dict[str, tuple[Path, TeamActivityEvent]] = {}
+        seen_event_ids: set[tuple[str, str]] = set()
+        ordered = sorted(
+            stored,
+            key=lambda item: (
+                item[1].occurred_at,
+                item[1].client_id,
+                item[1].sequence,
+                item[1].event_id,
+            ),
+        )
+        for path, event in ordered:
+            event_key = (event.client_id, event.event_id)
+            if event_key in seen_event_ids:
+                continue
+            seen_event_ids.add(event_key)
+            previous = current.get(event.run_id)
+            if previous is not None and previous[1].state.is_terminal:
+                if not event.state.is_terminal:
+                    continue
+            current[event.run_id] = path, event
+        return list(current.values())
+
+    def _select_bounded_records[T: TeamActivityEvent | TeamConversationEntry](
+        self, stored: list[tuple[Path, T]]
+    ) -> list[tuple[Path, T]]:
+        by_stream: dict[tuple[str, str], list[tuple[Path, T]]] = defaultdict(list)
+        for item in stored:
+            record = item[1]
+            by_stream[(record.member_id, record.client_id)].append(item)
+        streams = list(by_stream.values())
+        for records in streams:
+            records.sort(key=self._record_recency, reverse=True)
+        streams.sort(key=lambda records: self._record_recency(records[0]), reverse=True)
+
+        selected: list[tuple[Path, T]] = []
+        position = 0
+        while len(selected) < self.max_event_files:
+            added = False
+            for records in streams:
+                if position >= len(records):
+                    continue
+                selected.append(records[position])
+                added = True
+                if len(selected) >= self.max_event_files:
+                    break
+            if not added:
+                break
+            position += 1
+        return selected
+
+    @staticmethod
+    def _record_recency(
+        item: tuple[Path, TeamActivityEvent | TeamConversationEntry],
+    ) -> tuple[datetime, int, str, str]:
+        record = item[1]
+        record_id = (
+            record.event_id
+            if isinstance(record, TeamActivityEvent)
+            else record.entry_id
+        )
+        return record.occurred_at, record.sequence, record.client_id, record_id
+
+    def _compact_event_files(self) -> None:
+        stored, _ = self._load_event_files()
+        retained = self._select_bounded_records(self._current_event_files(stored))
+        self._delete_superseded_records(self.workspace_dir / "events", stored, retained)
+
+    def _compact_conversation_files(self) -> None:
+        stored, _ = self._load_conversation_files()
+        retained = self._select_bounded_records(stored)
+        self._delete_superseded_records(
+            self.workspace_dir / "conversations", stored, retained
+        )
+
+    def _delete_superseded_records[T: TeamActivityEvent | TeamConversationEntry](
+        self, root: Path, stored: list[tuple[Path, T]], retained: list[tuple[Path, T]]
+    ) -> None:
+        keep = {path for path, _ in retained}
+        for path, _ in sorted(stored, key=lambda item: str(item[0])):
+            if path in keep:
+                continue
+            self._unlink_record(path)
+            self._remove_empty_record_parents(path.parent, root)
+
+    def _delete_record_tree(self, root: Path) -> None:
+        for member_dir in self._child_directories(root):
             for client_dir in self._child_directories(member_dir):
                 for path in self._json_files(client_dir):
-                    if seen >= self.max_event_files:
-                        return records, True
-                    seen += 1
-                    try:
-                        record = self._read_model(
-                            path, TeamActivityEvent, required=True
-                        )
-                    except TeamWorkspaceStoreError:
-                        degraded = True
-                        continue
-                    if record is None:
-                        degraded = True
-                        continue
-                    expected_name = f"{record.sequence:020d}-{record.event_id}.json"
-                    if (
-                        record.workspace_id != self.identity.workspace_id
-                        or record.member_id != member_dir.name
-                        or record.client_id != client_dir.name
-                        or record.privacy_mode is not self.privacy_mode
-                        or path.name != expected_name
-                    ):
-                        degraded = True
-                        continue
-                    records.append(record)
-        return records, degraded
+                    self._unlink_record(path)
+                self._remove_empty_record_parents(client_dir, root)
+
+    @staticmethod
+    def _unlink_record(path: Path) -> None:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as error:
+            raise TeamWorkspaceStoreError(SyncError.WRITE_FAILED) from error
+
+    @staticmethod
+    def _remove_empty_record_parents(parent: Path, root: Path) -> None:
+        current = parent
+        while current != root:
+            try:
+                current.rmdir()
+            except OSError:
+                return
+            current = current.parent
+
+    def _can_tighten_history_scope(self, existing: TeamWorkspaceManifest) -> bool:
+        return (
+            existing.identity == self.identity
+            and existing.privacy_mode is self.privacy_mode
+            and existing.history_limit == self.history_limit
+            and _HISTORY_SCOPE_RANK[self.history_scope]
+            < _HISTORY_SCOPE_RANK[existing.history_scope]
+        )
 
     @staticmethod
     def _project_runs(
@@ -285,18 +453,29 @@ class SharedTeamWorkspaceStore:
         conversations: list[TeamConversationEntry],
         history_limit: int,
     ) -> tuple[TeamRunSnapshot, ...]:
-        seen_event_ids: set[str] = set()
+        seen_event_ids: set[tuple[str, str]] = set()
         runs: dict[str, TeamRunSnapshot] = {}
         started: dict[str, datetime] = {}
         ordered = sorted(
-            events, key=lambda item: (item.client_id, item.sequence, item.event_id)
+            events,
+            key=lambda item: (
+                item.occurred_at,
+                item.client_id,
+                item.sequence,
+                item.event_id,
+            ),
         )
         for event in ordered:
-            if event.event_id in seen_event_ids:
+            event_key = (event.client_id, event.event_id)
+            if event_key in seen_event_ids:
                 continue
-            seen_event_ids.add(event.event_id)
+            seen_event_ids.add(event_key)
             current = runs.get(event.run_id)
-            if current is not None and event.sequence <= current.sequence:
+            if (
+                current is not None
+                and event.client_id == current.client_id
+                and event.sequence <= current.sequence
+            ):
                 continue
             if (
                 current is not None
@@ -304,7 +483,10 @@ class SharedTeamWorkspaceStore:
                 and not event.state.is_terminal
             ):
                 continue
-            started.setdefault(event.run_id, event.occurred_at)
+            event_started_at = event.started_at or event.occurred_at
+            started[event.run_id] = min(
+                started.get(event.run_id, event_started_at), event_started_at
+            )
             runs[event.run_id] = TeamRunSnapshot(
                 run_id=event.run_id,
                 member_id=event.member_id,
@@ -319,14 +501,15 @@ class SharedTeamWorkspaceStore:
                 sequence=event.sequence,
             )
         history_by_run: dict[str, list[TeamConversationEntry]] = defaultdict(list)
-        seen_entries: set[str] = set()
+        seen_entries: set[tuple[str, str]] = set()
         for entry in sorted(
             conversations,
             key=lambda item: (item.client_id, item.sequence, item.entry_id),
         ):
-            if entry.entry_id in seen_entries:
+            entry_key = (entry.client_id, entry.entry_id)
+            if entry_key in seen_entries:
                 continue
-            seen_entries.add(entry.entry_id)
+            seen_entries.add(entry_key)
             history_by_run[entry.run_id].append(entry)
         with_history = (
             run.model_copy(

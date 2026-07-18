@@ -107,6 +107,7 @@ def test_message_history_redacts_secrets_paths_commands_and_code() -> None:
             "Inspect /Users/alice/private/token.txt\n"
             "API_KEY=super-secret\n"
             "$ cat ~/.ssh/id_rsa\n"
+            "/config reveal-secrets\n"
             "```sh\nrm -rf /\n```"
         ),
         occurred_at=NOW,
@@ -116,6 +117,7 @@ def test_message_history_redacts_secrets_paths_commands_and_code() -> None:
     assert "alice" not in entry.text
     assert "super-secret" not in entry.text
     assert "cat ~/.ssh" not in entry.text
+    assert "/config" not in entry.text
     assert "rm -rf" not in entry.text
     assert "[Filtered]" in entry.text
     assert "[Command omitted]" in entry.text

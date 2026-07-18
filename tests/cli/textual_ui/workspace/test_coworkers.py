@@ -107,7 +107,7 @@ async def test_roster_preview_run_drill_in_and_back_are_keyboard_accessible() ->
         detail = str(app.page.query_one("#coworker-run-detail", Static).render())
         assert "CONVERSATION HISTORY" in detail
         assert "Implement the permission boundary" in detail
-        assert "Message shared without content" in detail
+        assert "Content not shared" in detail
 
         await pilot.press("backspace")
         assert not app.page.has_class("run-detail")

@@ -44,10 +44,13 @@ const COATS = {
 };
 
 const GROUP_COLORS = ["#ff8205", "#20a779", "#5874d8", "#d25470", "#8c65af"];
+const LOCAL_ROOM_ID = "local-workspace";
 
 const state = {
   agents: [],
   groups: [],
+  fallbackGroups: [],
+  teamWorkspace: null,
   profiles: [],
   tools: [],
   coordination: null,
@@ -115,6 +118,11 @@ const elements = {
   summaryIdle: document.querySelector("#summary-idle"),
   coordinationStrip: document.querySelector("#coordination-strip"),
   workspaceBranch: document.querySelector("#workspace-branch"),
+  sidebarHeading: document.querySelector("#room-list-heading"),
+  sidebarAddGroup: document.querySelector("#add-group-button"),
+  localWorkspaceName: document.querySelector("#local-workspace-name"),
+  localWorkspaceAvatar: document.querySelector("#local-workspace-avatar"),
+  roomTitle: document.querySelector("#room-title"),
 };
 
 function readStoredState() {
@@ -126,6 +134,7 @@ function readStoredState() {
 }
 
 function persistState() {
+  if (state.teamWorkspace) return;
   const groupAssignments = Object.fromEntries(
     state.agents.map((agent) => [agent.tool_call_id, agent.group_id]),
   );
@@ -152,12 +161,13 @@ async function loadRoom() {
     UNASSIGNED_GROUP.id,
   ]);
 
-  state.groups = [
+  state.fallbackGroups = [
     COORDINATION_GROUP,
     ...sourceGroups.filter((group) => group.id !== COORDINATION_GROUP.id),
     ...customGroups.filter((group) => group.id !== COORDINATION_GROUP.id),
     UNASSIGNED_GROUP,
   ];
+  state.groups = state.fallbackGroups;
   try {
     const liveResponse = await fetch("/api/agent-runs", { cache: "no-store" });
     if (!liveResponse.ok) throw new Error("Live bridge unavailable");
@@ -168,8 +178,8 @@ async function loadRoom() {
     state.tools = Array.isArray(live.tools) ? live.tools : [];
     state.coordination = live.coordination || null;
     state.network = live.network || null;
-    state.agents = normalizeAgents(live.activities, groupIds, stored);
-    state.lastSnapshot = JSON.stringify(live.activities);
+    applyLivePayload(live, stored);
+    state.lastSnapshot = liveSnapshotKey(live);
     updateNetworkStatus();
   } catch {
     state.connected = false;
@@ -203,12 +213,194 @@ function normalizeAgents(activities, groupIds, stored) {
   });
 }
 
+function liveSnapshotKey(payload) {
+  return JSON.stringify({
+    activities: payload.activities,
+    team_workspace: payload.team_workspace || null,
+  });
+}
+
+function timestampSeconds(value) {
+  if (typeof value === "number") return value;
+  const milliseconds = Date.parse(value || "");
+  return Number.isFinite(milliseconds) ? milliseconds / 1000 : 0;
+}
+
+function coatForId(value) {
+  const names = Object.keys(COATS);
+  let hash = 0;
+  for (const character of String(value)) {
+    hash = (hash * 31 + character.charCodeAt(0)) >>> 0;
+  }
+  return names[hash % names.length];
+}
+
+function normalizeTeamWorkspace(value) {
+  if (!value || typeof value !== "object" || !value.snapshot) return null;
+  const snapshot = value.snapshot;
+  if (!Array.isArray(snapshot.members) || !Array.isArray(snapshot.runs)) return null;
+  return {
+    ...value,
+    snapshot,
+    local_agent_links:
+      value.local_agent_links && typeof value.local_agent_links === "object"
+        ? value.local_agent_links
+        : {},
+  };
+}
+
+function coworkerRooms(teamWorkspace) {
+  const members = teamWorkspace.snapshot.members;
+  const localMemberId = teamWorkspace.local_member_id;
+  const rooms = members.map((member, index) => ({
+    id: member.member_id,
+    name: `${member.display_name}'s room`,
+    shortName: member.display_name,
+    color:
+      member.member_id === localMemberId
+        ? GROUP_COLORS[0]
+        : GROUP_COLORS[(index + 1) % GROUP_COLORS.length],
+    kind: "coworker",
+    isLocal: member.member_id === localMemberId,
+    presence: member.presence || "offline",
+    branch: member.branch || "No branch shared",
+    updated_at: timestampSeconds(member.last_seen_at),
+  }));
+  if (!rooms.some((room) => room.isLocal)) {
+    rooms.unshift({
+      id: localMemberId || LOCAL_ROOM_ID,
+      name: "My room",
+      shortName: "Me",
+      color: GROUP_COLORS[0],
+      kind: "coworker",
+      isLocal: true,
+      presence: "online",
+      branch: "Local branch",
+    });
+  }
+  return rooms;
+}
+
+function normalizeSharedAgent(run, member, room) {
+  const history = Array.isArray(run.history) ? run.history : [];
+  const summary = run.summary ? String(run.summary).replaceAll("_", " ") : "";
+  return {
+    tool_call_id: `team:${run.run_id}`,
+    team_run_id: run.run_id,
+    parent_session_id: null,
+    child_session_id: null,
+    agent_name: run.agent_name || "agent",
+    agent_display_name: run.agent_display_name || run.agent_name || "Agent",
+    task: summary || "Shared agent run",
+    state: run.state || "idle",
+    started_at: timestampSeconds(run.started_at),
+    updated_at: timestampSeconds(run.updated_at),
+    current_activity: summary || null,
+    is_primary: false,
+    is_orchestrator: false,
+    group_id: room.id,
+    coat: coatForId(run.run_id),
+    source: "team",
+    runtime_live: !TERMINAL_STATES.has(run.state) && member?.presence === "online",
+    resumable: false,
+    owner_display_name: member?.display_name || run.member_display_name,
+    branch: member?.branch || null,
+    events: history.map((entry) =>
+      entry.text ? `${entry.role}: ${entry.text}` : `${entry.role}: content not shared`,
+    ),
+    conversation: history.map((entry) => ({
+      id: entry.entry_id,
+      role: entry.role,
+      content: entry.text || "Content not shared",
+      status: "succeeded",
+      created_at: timestampSeconds(entry.occurred_at),
+      updated_at: timestampSeconds(entry.occurred_at),
+    })),
+    approvals: [],
+    questions: [],
+    queued_messages: 0,
+  };
+}
+
+function applyLivePayload(payload, stored) {
+  const teamWorkspace = normalizeTeamWorkspace(payload.team_workspace);
+  state.teamWorkspace = teamWorkspace;
+  if (!teamWorkspace) {
+    state.groups = state.fallbackGroups;
+    const groupIds = new Set(state.groups.map((group) => group.id));
+    state.agents = normalizeAgents(payload.activities, groupIds, stored);
+    updateTeamPresentation();
+    return;
+  }
+
+  state.groups = coworkerRooms(teamWorkspace);
+  const localRoom = state.groups.find((room) => room.isLocal) || state.groups[0];
+  const localAgents = normalizeAgents(
+    payload.activities,
+    new Set([localRoom.id]),
+    stored,
+  ).map((agent) => ({ ...agent, group_id: localRoom.id }));
+  const linkedRuns = new Set(Object.keys(teamWorkspace.local_agent_links));
+  const members = new Map(
+    teamWorkspace.snapshot.members.map((member) => [member.member_id, member]),
+  );
+  const rooms = new Map(state.groups.map((room) => [room.id, room]));
+  const sharedAgents = teamWorkspace.snapshot.runs
+    .filter((run) => !linkedRuns.has(run.run_id))
+    .map((run) => {
+      const room = rooms.get(run.member_id);
+      return room ? normalizeSharedAgent(run, members.get(run.member_id), room) : null;
+    })
+    .filter(Boolean);
+  state.agents = [...localAgents, ...sharedAgents];
+  if (
+    state.selectedGroupId !== "all" &&
+    !state.groups.some((room) => room.id === state.selectedGroupId)
+  ) {
+    state.selectedGroupId = "all";
+  }
+  updateTeamPresentation();
+}
+
+function updateTeamPresentation() {
+  const isTeam = Boolean(state.teamWorkspace);
+  if (elements.sidebarHeading) {
+    elements.sidebarHeading.textContent = isTeam ? "Coworker rooms" : "Groups";
+  }
+  if (elements.sidebarAddGroup) elements.sidebarAddGroup.hidden = isTeam;
+  if (elements.toolbarAddGroupButton) elements.toolbarAddGroupButton.hidden = isTeam;
+  if (elements.roomTitle) {
+    elements.roomTitle.textContent = isTeam ? "Team agent rooms" : "The agent room";
+  }
+  const localRoom = state.groups.find((room) => room.isLocal);
+  if (localRoom && elements.localWorkspaceName) {
+    elements.localWorkspaceName.textContent = localRoom.shortName || "My workspace";
+  }
+  if (localRoom && elements.localWorkspaceAvatar) {
+    elements.localWorkspaceAvatar.textContent = (localRoom.shortName || "Me")
+      .split(/\s+/)
+      .map((part) => part[0] || "")
+      .join("")
+      .slice(0, 2)
+      .toUpperCase();
+  }
+}
+
 function setFeedStatus(label, isError) {
   elements.feedStatus.classList.toggle("is-error", isError);
   elements.feedStatus.querySelector("span").textContent = label;
 }
 
 function updateNetworkStatus() {
+  if (state.teamWorkspace) {
+    const connection = state.teamWorkspace.snapshot.connection_state;
+    if (connection === "connected") {
+      setFeedStatus("Team sync live", false);
+    } else {
+      setFeedStatus(`Team sync ${connection || "stale"}`, true);
+    }
+    return;
+  }
   if (state.network?.authenticated) {
     const label =
       state.network.selected_mode === "direct" ? "Mistral direct" : "Mistral ready";
@@ -238,12 +430,12 @@ async function refreshLiveRuns() {
     state.coordination = payload.coordination || state.coordination;
     state.network = payload.network || state.network;
     updateNetworkStatus();
-    const snapshot = JSON.stringify(payload.activities);
+    const snapshot = liveSnapshotKey(payload);
     if (snapshot === state.lastSnapshot) return;
     state.lastSnapshot = snapshot;
     const stored = readStoredState();
-    const groupIds = new Set(state.groups.map((group) => group.id));
-    state.agents = normalizeAgents(payload.activities, groupIds, stored);
+    applyLivePayload(payload, stored);
+    updateNetworkStatus();
     render();
   } catch {
     state.connected = false;
@@ -303,7 +495,11 @@ function render() {
 function renderGroupList() {
   elements.groupList.replaceChildren();
   const groups = [
-    { id: "all", name: "All groups", color: "#171722" },
+    {
+      id: "all",
+      name: state.teamWorkspace ? "All rooms" : "All groups",
+      color: "#171722",
+    },
     ...state.groups,
   ];
 
@@ -346,6 +542,7 @@ function renderZones() {
       state.agents.some((agent) => agent.group_id === UNASSIGNED_GROUP.id)
     );
   });
+  elements.zones.dataset.roomCount = String(Math.min(visibleGroups.length, 3));
 
   for (const group of visibleGroups) {
     const zone = document.createElement("section");
@@ -357,6 +554,14 @@ function renderZones() {
     heading.className = "zone-heading";
     const title = document.createElement("strong");
     title.textContent = group.name;
+    const roomMeta = document.createElement("span");
+    roomMeta.className = "room-meta";
+    if (group.kind === "coworker") {
+      const presence = group.presence === "online" ? "Online" : "Offline";
+      roomMeta.textContent = `${presence}${group.branch ? ` · ${group.branch}` : ""}`;
+      zone.classList.toggle("is-offline", group.presence === "offline");
+      zone.classList.toggle("is-local-room", group.isLocal);
+    }
     const count = document.createElement("span");
     const groupAgents = state.agents.filter((agent) => agent.group_id === group.id);
     const matchingAgents = groupAgents.filter(agentMatches);
@@ -366,15 +571,22 @@ function renderZones() {
         : `${matchingAgents.length} of ${groupAgents.length}`;
     const tools = document.createElement("div");
     tools.className = "zone-tools";
-    const addAgent = document.createElement("button");
-    addAgent.type = "button";
-    addAgent.className = "zone-add-agent";
-    addAgent.textContent = "+";
-    addAgent.title = `Run an agent in ${group.name}`;
-    addAgent.setAttribute("aria-label", `Run an agent in ${group.name}`);
-    addAgent.addEventListener("click", () => openAgentDialog(group.id, addAgent));
-    tools.append(count, addAgent);
-    heading.append(title, tools);
+    tools.append(count);
+    if (!state.teamWorkspace || group.isLocal) {
+      const addAgent = document.createElement("button");
+      addAgent.type = "button";
+      addAgent.className = "zone-add-agent";
+      addAgent.textContent = "+";
+      addAgent.title = `Run an agent in ${group.name}`;
+      addAgent.setAttribute("aria-label", `Run an agent in ${group.name}`);
+      addAgent.addEventListener("click", () => openAgentDialog(group.id, addAgent));
+      tools.append(addAgent);
+    }
+    const headingCopy = document.createElement("div");
+    headingCopy.className = "zone-heading-copy";
+    headingCopy.append(title);
+    if (group.kind === "coworker") headingCopy.append(roomMeta);
+    heading.append(headingCopy, tools);
 
     const agentLayer = document.createElement("div");
     agentLayer.className = "zone-agents";
@@ -384,22 +596,31 @@ function renderZones() {
       agentLayer.append(agentElement);
     }
     if (groupAgents.length === 0) {
-      const empty = document.createElement("button");
-      empty.type = "button";
+      const empty = document.createElement(
+        !state.teamWorkspace || group.isLocal ? "button" : "div",
+      );
+      if (empty instanceof HTMLButtonElement) empty.type = "button";
       empty.className = "zone-empty";
       const emptyTitle = document.createElement("strong");
-      emptyTitle.textContent = "No agents";
+      emptyTitle.textContent = group.presence === "offline" ? "Coworker offline" : "No agents";
       const emptyAction = document.createElement("span");
-      emptyAction.textContent = "Run an agent";
+      emptyAction.textContent =
+        !state.teamWorkspace || group.isLocal
+          ? "Run an agent"
+          : "Waiting for shared activity";
       empty.append(emptyTitle, emptyAction);
-      empty.addEventListener("click", () => openAgentDialog(group.id, empty));
+      if (!state.teamWorkspace || group.isLocal) {
+        empty.addEventListener("click", () => openAgentDialog(group.id, empty));
+      }
       agentLayer.append(empty);
     }
 
     zone.append(heading, agentLayer);
-    zone.addEventListener("dragover", handleZoneDragOver);
-    zone.addEventListener("dragleave", handleZoneDragLeave);
-    zone.addEventListener("drop", handleZoneDrop);
+    if (!state.teamWorkspace) {
+      zone.addEventListener("dragover", handleZoneDragOver);
+      zone.addEventListener("dragleave", handleZoneDragLeave);
+      zone.addEventListener("drop", handleZoneDrop);
+    }
     elements.zones.append(zone);
   }
 
@@ -412,7 +633,8 @@ function createAgentElement(agent) {
   const coat = COATS[agent.coat] || COATS.orange;
 
   element.dataset.agentId = agent.tool_call_id;
-  element.draggable = !agent.is_orchestrator;
+  element.draggable =
+    agent.source === "live" && !agent.is_orchestrator && !state.teamWorkspace;
   element.classList.add(`state-${agent.state}`);
   element.classList.toggle("is-selected", state.selectedAgentId === agent.tool_call_id);
   element.style.setProperty("--coat", coat[0]);
@@ -435,6 +657,10 @@ function createAgentElement(agent) {
   mainButton.addEventListener("click", () => openAgentPanel(agent.tool_call_id, "status"));
   for (const action of element.querySelectorAll("[data-agent-action]")) {
     const view = action.dataset.agentAction;
+    if (agent.source === "team" && view === "chat") {
+      action.hidden = true;
+      continue;
+    }
     const isActive =
       state.selectedAgentId === agent.tool_call_id && state.detailView === view;
     action.classList.toggle("is-active", isActive);
@@ -444,8 +670,10 @@ function createAgentElement(agent) {
     action.addEventListener("pointerdown", (event) => event.stopPropagation());
     action.draggable = false;
   }
-  element.addEventListener("dragstart", handleAgentDragStart);
-  element.addEventListener("dragend", handleAgentDragEnd);
+  if (element.draggable) {
+    element.addEventListener("dragstart", handleAgentDragStart);
+    element.addEventListener("dragend", handleAgentDragEnd);
+  }
   return element;
 }
 
@@ -505,10 +733,16 @@ function clamp(value, min, max) {
 
 function renderSummary() {
   elements.summaryRunning.textContent = String(
-    state.agents.filter((agent) => ACTIVE_STATES.has(agent.state)).length,
+    state.agents.filter(
+      (agent) => agent.runtime_live === true && ACTIVE_STATES.has(agent.state),
+    ).length,
   );
   elements.summaryAttention.textContent = String(
-    state.agents.filter((agent) => ATTENTION_STATES.has(agent.state)).length,
+    state.agents.filter(
+      (agent) =>
+        ATTENTION_STATES.has(agent.state) &&
+        (agent.source !== "team" || agent.runtime_live === true),
+    ).length,
   );
   elements.summaryPast.textContent = String(
     state.agents.filter((agent) => agent.runtime_live !== true).length,
@@ -519,7 +753,9 @@ function renderSummary() {
   const coordination = state.coordination;
   if (coordination && elements.coordinationStrip) {
     const memory = Number(coordination.memory_percent || 0).toFixed(1);
-    elements.coordinationStrip.textContent = `${coordination.agents} isolated agents · ${coordination.queued_messages} queued · ${memory}% context`;
+    elements.coordinationStrip.textContent = state.teamWorkspace
+      ? `${state.groups.length} coworker rooms · ${coordination.agents} local agents · ${state.teamWorkspace.snapshot.connection_state}`
+      : `${coordination.agents} isolated agents · ${coordination.queued_messages} queued · ${memory}% context`;
     if (elements.workspaceBranch) {
       elements.workspaceBranch.textContent = coordination.integration_branch || "Local branch";
     }
@@ -534,7 +770,9 @@ function updateEmptyState() {
   const message = elements.emptyState.querySelector("span");
   if (state.connected && state.agents.length === 0) {
     title.textContent = "No runs yet";
-    message.textContent = "Use + Agent to launch a real Vibe run in a group.";
+    message.textContent = state.teamWorkspace
+      ? "Launch an agent in your room or wait for a coworker to sync."
+      : "Use + Agent to launch a real Vibe run in a group.";
     return;
   }
   title.textContent = "No agents here";
@@ -617,11 +855,14 @@ function renderDetails() {
   title.textContent = agent.agent_display_name;
   const source = document.createElement("span");
   source.className = "detail-source";
-  source.textContent = agent.is_orchestrator
-    ? "Control agent"
-    : agent.runtime_live
-      ? "Isolated worker"
-      : "Retained worker";
+  source.textContent =
+    agent.source === "team"
+      ? `Shared by ${agent.owner_display_name || "a coworker"}`
+      : agent.is_orchestrator
+        ? "Control agent"
+        : agent.runtime_live
+          ? "Isolated worker"
+          : "Retained worker";
   title.append(source);
   const detailState = document.createElement("span");
   detailState.className = "detail-state";
@@ -637,6 +878,7 @@ function renderDetails() {
     ["history", "History"],
     ["status", "Status"],
   ]) {
+    if (agent.source === "team" && view === "chat") continue;
     const tab = document.createElement("button");
     tab.type = "button";
     tab.textContent = label;
@@ -723,10 +965,12 @@ function renderStatusView(agent, stateMeta) {
   groupSection.className = "detail-section";
   const groupLabel = document.createElement("label");
   groupLabel.className = "group-select";
-  groupLabel.textContent = "Group";
+  groupLabel.textContent = state.teamWorkspace ? "Coworker room" : "Group";
   const groupSelect = document.createElement("select");
   groupSelect.dataset.focusKey = "detail-group";
-  groupSelect.disabled = Boolean(agent.is_orchestrator);
+  groupSelect.disabled = Boolean(
+    agent.is_orchestrator || state.teamWorkspace || agent.source !== "live",
+  );
   groupSelect.setAttribute("aria-label", `Move ${agent.agent_display_name} to group`);
   for (const group of state.groups) {
     const option = document.createElement("option");
@@ -740,23 +984,37 @@ function renderStatusView(agent, stateMeta) {
   const controlActions = document.createElement("div");
   controlActions.className = "detail-actions";
   const sessionId = agent.child_session_id || agent.parent_session_id;
-  controlActions.append(
-    actionButton("Copy session ID", () => copyText(sessionId)),
-  );
-  if (agent.runtime_live && ACTIVE_STATES.has(agent.state)) {
+  if (agent.source === "live") {
+    controlActions.append(
+      actionButton("Copy session ID", () => copyText(sessionId)),
+    );
+  }
+  if (
+    agent.source === "live" &&
+    agent.runtime_live &&
+    ACTIVE_STATES.has(agent.state)
+  ) {
     controlActions.append(
       actionButton("Cancel response", () => cancelRun(agent.tool_call_id)),
     );
   }
-  if (agent.runtime_live && !agent.is_orchestrator) {
+  if (agent.source === "live" && agent.runtime_live && !agent.is_orchestrator) {
     controlActions.append(
       actionButton("Stop agent", () => stopAgent(agent.tool_call_id), "button-danger"),
     );
-  } else if (!agent.runtime_live && agent.merge_status === "ready") {
+  } else if (
+    agent.source === "live" &&
+    !agent.runtime_live &&
+    agent.merge_status === "ready"
+  ) {
     controlActions.append(
       actionButton("Validate & merge", () => mergeAgent(agent.tool_call_id)),
     );
-  } else if (!agent.runtime_live && !agent.is_orchestrator) {
+  } else if (
+    agent.source === "live" &&
+    !agent.runtime_live &&
+    !agent.is_orchestrator
+  ) {
     controlActions.append(
       actionButton("Continue chat", () => {
         state.detailView = "chat";
@@ -772,7 +1030,9 @@ function renderStatusView(agent, stateMeta) {
     const notice = document.createElement("p");
     notice.className = "bridge-notice";
     notice.textContent =
-      "This cat is demo data. Start the Agent Room runner to launch and control real Vibe sessions.";
+      agent.source === "team"
+        ? "This coworker's cat is synchronized and read-only. Shared history follows the team's privacy setting."
+        : "This cat is demo data. Start the Agent Room runner to launch and control real Vibe sessions.";
     groupSection.append(notice);
   }
 
@@ -784,18 +1044,24 @@ function renderStatusView(agent, stateMeta) {
   dataGrid.className = "detail-grid";
   appendDetailData(dataGrid, "Profile", agent.agent_name);
   appendDetailData(dataGrid, "Started", formatTimestamp(agent.started_at));
-  appendDetailData(dataGrid, "Parent session", agent.parent_session_id || "Not reported");
-  appendDetailData(dataGrid, "Child session", agent.child_session_id || "Not applicable");
+  if (agent.source === "live") {
+    appendDetailData(dataGrid, "Parent session", agent.parent_session_id || "Not reported");
+    appendDetailData(dataGrid, "Child session", agent.child_session_id || "Not applicable");
+  } else {
+    appendDetailData(dataGrid, "Owner", agent.owner_display_name || "Coworker");
+  }
   appendDetailData(dataGrid, "Branch", agent.branch || "Not applicable");
-  appendDetailData(dataGrid, "Worktree", agent.worktree_path || "Not applicable");
-  appendDetailData(
-    dataGrid,
-    "Worktree state",
-    agent.worktree_dirty
-      ? `${agent.uncommitted_files || 0} uncommitted file(s)`
-      : `${agent.new_commit_count || 0} new commit(s)`,
-  );
-  appendDetailData(dataGrid, "Merge", formatMergeState(agent));
+  if (agent.source === "live") {
+    appendDetailData(dataGrid, "Worktree", agent.worktree_path || "Not applicable");
+    appendDetailData(
+      dataGrid,
+      "Worktree state",
+      agent.worktree_dirty
+        ? `${agent.uncommitted_files || 0} uncommitted file(s)`
+        : `${agent.new_commit_count || 0} new commit(s)`,
+    );
+    appendDetailData(dataGrid, "Merge", formatMergeState(agent));
+  }
   dataSection.append(dataHeading, dataGrid);
 
   fragment.append(taskSection, metricsSection, groupSection, dataSection);
@@ -1407,7 +1673,14 @@ function getAgent(agentId) {
 
 async function moveAgent(agentId, groupId) {
   const agent = getAgent(agentId);
-  if (!agent || !state.groups.some((group) => group.id === groupId)) return;
+  if (
+    state.teamWorkspace ||
+    !agent ||
+    agent.source !== "live" ||
+    !state.groups.some((group) => group.id === groupId)
+  ) {
+    return;
+  }
   const previousGroup = agent.group_id;
   agent.group_id = groupId;
   persistState();
@@ -1482,6 +1755,7 @@ function renderSwatches() {
 }
 
 function createGroup() {
+  if (state.teamWorkspace) return;
   const name = elements.groupName.value.trim();
   if (!name) return;
   const idRoot = name
@@ -1507,14 +1781,20 @@ function openAgentDialog(groupId, origin) {
   elements.agentDialogError.hidden = true;
   elements.agentDialogError.textContent = "";
   elements.agentGroup.replaceChildren();
-  for (const group of state.groups) {
+  const availableGroups = state.teamWorkspace
+    ? state.groups.filter((group) => group.isLocal)
+    : state.groups;
+  for (const group of availableGroups) {
     const option = document.createElement("option");
     option.value = group.id;
     option.textContent = group.name;
     elements.agentGroup.append(option);
   }
+  const localRoom = availableGroups[0];
   const preferredGroup =
-    groupId && groupId !== "all"
+    state.teamWorkspace && localRoom
+      ? localRoom.id
+      : groupId && groupId !== "all"
       ? groupId
       : state.selectedGroupId !== "all"
         ? state.selectedGroupId
@@ -1598,7 +1878,7 @@ async function createAgentRun() {
         agent_name: elements.agentProfile.value,
         display_name: elements.agentName.value.trim(),
         task: elements.agentTask.value.trim(),
-        group_id: elements.agentGroup.value,
+        group_id: state.teamWorkspace ? UNASSIGNED_GROUP.id : elements.agentGroup.value,
         enabled_tools: selectedAgentTools(),
         auto_approve: elements.agentAutoApprove.checked,
         client_message_id: crypto.randomUUID(),
@@ -1609,7 +1889,9 @@ async function createAgentRun() {
     elements.agentDialog.close();
     state.lastSnapshot = "";
     await refreshLiveRuns();
-    const group = state.groups.find((candidate) => candidate.id === payload.group_id);
+    const group = state.teamWorkspace
+      ? state.groups.find((candidate) => candidate.isLocal)
+      : state.groups.find((candidate) => candidate.id === payload.group_id);
     elements.roomAnnouncer.textContent = `${payload.agent_display_name} queued in ${group?.name || "Unassigned"}.`;
     openAgentPanel(payload.tool_call_id, "status");
   } catch (error) {

@@ -90,6 +90,10 @@ def _validate_utc(value: datetime) -> datetime:
     return value
 
 
+def _validate_optional_utc(value: datetime | None) -> datetime | None:
+    return None if value is None else _validate_utc(value)
+
+
 def _validate_label(value: str) -> str:
     normalized = " ".join(value.split())
     if not normalized or len(normalized) > MAX_LABEL_LENGTH:
@@ -162,10 +166,12 @@ class TeamActivityEvent(_StrictModel):
     state: ActivityState
     privacy_mode: PrivacyMode
     summary: ActivitySummary | None = None
+    started_at: datetime | None = None
     occurred_at: datetime
 
     _member_display_name = field_validator("member_display_name")(_validate_label)
     _agent_display_name = field_validator("agent_display_name")(_validate_label)
+    _started_at = field_validator("started_at")(_validate_optional_utc)
     _occurred_at = field_validator("occurred_at")(_validate_utc)
 
     @model_validator(mode="after")

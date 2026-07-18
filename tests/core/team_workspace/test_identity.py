@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from git import Repo
+import pytest
 
 from vibe.core.team_workspace import (
     derive_run_id,
@@ -35,7 +36,33 @@ def test_nested_paths_in_same_repository_share_workspace_identity(
     nested_identity = discover_workspace_identity(nested)
 
     assert root_identity == nested_identity
-    assert root_identity.display_name == tmp_path.name
+    assert root_identity.display_name == "project"
+
+
+@pytest.mark.parametrize(
+    ("remote", "label"),
+    [
+        ("https://example.com/team/project.git", "project"),
+        ("git@example.com:team/project.git", "project"),
+        ("/srv/git/project.git", "project"),
+        (r"C:\team\project.git", "project"),
+        (r"..\project.git", "project"),
+        (r"\\server\share\project.git", "project"),
+    ],
+)
+def test_remote_labels_are_separator_safe_and_fingerprints_stay_normalized(
+    tmp_path: Path, remote: str, label: str
+) -> None:
+    project = tmp_path / "checkout"
+    repository = Repo.init(project)
+    repository.create_remote("origin", remote)
+
+    identity = discover_workspace_identity(project)
+
+    assert identity.display_name == label
+    assert "/" not in identity.display_name
+    assert "\\" not in identity.display_name
+    assert identity == discover_workspace_identity(project)
 
 
 def test_member_identity_is_not_keyed_by_display_or_os_username_alone() -> None:

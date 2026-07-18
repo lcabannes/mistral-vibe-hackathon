@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import cast
 from unittest.mock import AsyncMock
 
@@ -112,6 +113,29 @@ async def test_agent_home_uses_the_discovered_room_as_management_backend() -> No
         assert "Visible in both clients" in str(
             home.query_one("#office-detail-content", Static).render()
         )
+
+
+def test_team_service_builder_preserves_committed_remote_and_branch(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    config = build_test_vibe_config(
+        displayed_workdir=str(project),
+        team_workspace={
+            "enabled": True,
+            "team_repository_url": "ssh://git@example.test/team.git",
+            "team_branch": "vibe-team-demo",
+        },
+    )
+    app = build_test_vibe_app(config=config)
+
+    service = app._build_team_workspace_service()
+
+    assert service.enabled
+    assert service._transport is not None
+    assert service._transport.remote_url == "ssh://git@example.test/team.git"
+    assert service._transport.branch == "vibe-team-demo"
 
 
 @pytest.mark.asyncio
