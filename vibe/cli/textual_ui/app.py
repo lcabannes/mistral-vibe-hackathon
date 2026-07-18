@@ -1469,7 +1469,17 @@ class VibeApp(App):  # noqa: PLR0904
     def on_workspace_navigation_view_selected(
         self, message: WorkspaceNavigation.ViewSelected
     ) -> None:
+        if message.view is WorkspaceView.HOME:
+            self._show_workspace(message.view, focus=False)
+            self.call_after_refresh(self.query_one(HomePage).focus_agents)
+            return
         self._show_workspace(message.view)
+
+    def on_home_page_navigation_requested(
+        self, message: HomePage.NavigationRequested
+    ) -> None:
+        message.stop()
+        self.query_one(WorkspaceNavigation).focus()
 
     async def on_home_page_agent_message_submitted(
         self, message: HomePage.AgentMessageSubmitted

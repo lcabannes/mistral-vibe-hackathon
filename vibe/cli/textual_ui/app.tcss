@@ -210,6 +210,10 @@ TextArea > .text-area--cursor {
     color: $foreground;
 }
 
+TextArea:ansi > .text-area--cursor {
+    color: $ansi-foreground;
+}
+
 #chat {
     layout: stream;
     height: 1fr;
@@ -428,6 +432,10 @@ OptionList, OptionList:focus {
     border: none;
     padding: 0;
     scrollbar-visibility: hidden;
+
+    &:ansi {
+        color: $ansi-foreground;
+    }
 
     &.recording {
         color: $text-muted;
