@@ -153,6 +153,7 @@ from vibe.cli.textual_ui.windowing import (
     sync_backfill_state,
 )
 from vibe.cli.textual_ui.word_selection import WordSelectScreen
+from vibe.cli.turn_summary import create_narrator_backend
 from vibe.cli.update_notifier import (
     PyPIUpdateGateway,
     UpdateCacheRepository,
@@ -183,12 +184,19 @@ from vibe.core.config import DEFAULT_THEME, AnyVibeConfig, ModelConfig
 from vibe.core.config.patch import escape_json_pointer_token
 from vibe.core.data_retention import DATA_RETENTION_MESSAGE
 from vibe.core.hooks.models import HookStartEvent
+from vibe.core.local_model import ensure_local_model_ready
 from vibe.core.log_reader import LogReader
 from vibe.core.logger import logger
+from vibe.core.path_guard import DEFAULT_PROTECTED_PATHS
 from vibe.core.paths import HISTORY_FILE
 from vibe.core.rewind import RewindError
 from vibe.core.sentry import capture_sentry_exception
 from vibe.core.session.image_snapshot import ImageSnapshotError, snapshot_image
+from vibe.core.session.recall import (
+    RecallResult,
+    render_recall_context,
+    search_session_summaries,
+)
 from vibe.core.session.resume_sessions import (
     ResumeSessionInfo,
     list_local_resume_sessions,
@@ -200,6 +208,7 @@ from vibe.core.session.saved_sessions import (
     update_saved_session_title_at_path,
 )
 from vibe.core.session.session_loader import SessionLoader
+from vibe.core.session.session_summarizer import SessionSummarizer
 from vibe.core.session.title_format import format_session_title
 from vibe.core.telemetry.types import (
     ProjectPickerTelemetryPayload,
@@ -466,6 +475,9 @@ class VibeApp(App):  # noqa: PLR0904
     CSS_PATH = "app.tcss"
     PAUSE_GC_ON_SCROLL: ClassVar[bool] = True
 
+    _session_summarizer: SessionSummarizer | None
+    _recall_results: list[RecallResult]
+
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("ctrl+c", "interrupt_or_quit", "Quit", show=False),
         Binding("ctrl+d", "delete_right_or_quit", "Quit", show=False, priority=True),
@@ -570,8 +582,11 @@ class VibeApp(App):  # noqa: PLR0904
         self._narrator_manager: NarratorManagerPort = (
             narrator_manager or self._make_default_narrator_manager()
         )
-
-        self._rewind_mode = False
+        self._session_summarizer, self._recall_results, self._rewind_mode = (
+            None,
+            [],
+            False,
+        )
         self._rewind_highlighted_widget: UserMessage | None = None
         self._fatal_init_error = False
         self._force_quit_task: asyncio.Task[None] | None = None
@@ -837,9 +852,39 @@ class VibeApp(App):  # noqa: PLR0904
             self._startup_command_availability_ready.set()
         await self._check_and_show_whats_new()
         self._schedule_update_notification()
+        self.run_worker(self._ensure_local_model(), exclusive=False)
         if self._show_resume_picker:
             return
         self._process_startup_prompt()
+
+    async def _ensure_local_model(self) -> None:
+        """Health-check/start/warm the privacy-routing local model off-path.
+
+        Runs in the background so startup isn't blocked; the goal is that by
+        the time the first sensitive operation routes locally, the server is
+        up and the weights are loaded — and if that's impossible, the user
+        hears about it now instead of mid-task.
+        """
+        try:
+            report = await ensure_local_model_ready(self.agent_loop.config)
+        except Exception:
+            logger.exception("Local model readiness check failed")
+            return
+        if report.status == "unreachable":
+            await self._mount_and_scroll(
+                WarningMessage(
+                    f"Privacy routing: local model endpoint {report.endpoint} "
+                    f"is unreachable. {report.detail}",
+                    show_border=False,
+                )
+            )
+        elif report.status == "started":
+            await self._mount_and_scroll(
+                UserCommandMessage(
+                    f"Privacy routing: started the local model server "
+                    f"({report.endpoint})."
+                )
+            )
 
     async def _process_startup_prompt_when_available(self) -> None:
         await self._startup_command_availability_ready.wait()
@@ -2306,6 +2351,7 @@ class VibeApp(App):  # noqa: PLR0904
             )
         finally:
             self._narrator_manager.on_turn_end()
+            self._checkpoint_session_summary()
             self._agent_running = False
             self._interrupt_requested = False
             self._agent_task = None
@@ -3280,6 +3326,9 @@ class VibeApp(App):  # noqa: PLR0904
 
     async def _clear_history(self, **kwargs: Any) -> None:
         try:
+            # Snapshot the ending session for its final summary before
+            # clear_history resets messages and rotates the session dir.
+            await self._finalize_session_summary()
             await self.agent_loop.clear_history()
             await self._reset_message_widgets()
 
@@ -3378,6 +3427,9 @@ class VibeApp(App):  # noqa: PLR0904
     ) -> None:
         self._agent_running = True
         try:
+            # Compaction ends the current session; snapshot it for its final
+            # summary before the reset.
+            await self._finalize_session_summary()
             await self.agent_loop.compact(extra_instructions=extra_instructions)
             compact_msg.set_complete(
                 old_session_id=old_session_id, new_session_id=self.agent_loop.session_id
@@ -3393,6 +3445,241 @@ class VibeApp(App):  # noqa: PLR0904
             self._agent_task = None
             if self.event_handler:
                 self.event_handler.current_compact = None
+
+    async def _recall_command(self, cmd_args: str = "", **kwargs: Any) -> None:
+        if not self.agent_loop.session_logger.enabled:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    "Session logging is disabled in configuration.",
+                    collapsed=self._tools_collapsed,
+                )
+            )
+            return
+
+        args = cmd_args.strip()
+        subcommand, _, index_text = args.partition(" ")
+        if subcommand.lower() in {"use", "resume"}:
+            try:
+                index = int(index_text.strip())
+            except ValueError:
+                await self._mount_and_scroll(
+                    ErrorMessage(
+                        f"Usage: /recall {subcommand.lower()} <result number>",
+                        collapsed=self._tools_collapsed,
+                    )
+                )
+                return
+            if subcommand.lower() == "use":
+                await self._recall_inject(index)
+            else:
+                await self._recall_resume(index)
+            return
+
+        results = await asyncio.to_thread(
+            search_session_summaries,
+            args,
+            self.config.session_logging,
+            exclude_session_id=self.agent_loop.session_id,
+        )
+        self._recall_results = results
+
+        if not results:
+            hint = (
+                "No past session summaries match that query."
+                if args
+                else "No summarized past sessions yet. Summaries are generated when a session ends (and periodically during long sessions)."
+            )
+            await self._mount_and_scroll(UserCommandMessage(hint))
+            return
+
+        heading = f"## Recalled sessions{f' matching “{args}”' if args else ''}\n\n"
+        lines = []
+        for i, result in enumerate(results, start=1):
+            title = result.title or "Untitled session"
+            when = (result.end_time or "")[:10]
+            tags = f" `{', '.join(result.tags[:5])}`" if result.tags else ""
+            lines.append(f"{i}. **{title}** ({when}){tags}\n   {result.summary}")
+        footer = (
+            "\n\nInject one as context with `/recall use <n>`, "
+            "or re-enter the full session with `/recall resume <n>`."
+        )
+        await self._mount_and_scroll(
+            UserCommandMessage(heading + "\n".join(lines) + footer)
+        )
+
+    def _recall_result_at(self, index: int) -> RecallResult | None:
+        if 1 <= index <= len(self._recall_results):
+            return self._recall_results[index - 1]
+        return None
+
+    async def _recall_inject(self, index: int) -> None:
+        result = self._recall_result_at(index)
+        if result is None:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    "No such recall result. Run /recall <keywords> first.",
+                    collapsed=self._tools_collapsed,
+                )
+            )
+            return
+        await self.agent_loop.inject_user_context(render_recall_context(result))
+        title = result.title or result.session_id
+        await self._mount_and_scroll(
+            UserCommandMessage(
+                f"Injected summary of session **{title}** into the conversation context."
+            )
+        )
+
+    async def _recall_resume(self, index: int) -> None:
+        result = self._recall_result_at(index)
+        if result is None:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    "No such recall result. Run /recall <keywords> first.",
+                    collapsed=self._tools_collapsed,
+                )
+            )
+            return
+
+        if self._agent_running:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    "Cannot resume another session while the agent is running.",
+                    collapsed=self._tools_collapsed,
+                )
+            )
+            return
+
+        # Resuming ends the current session; snapshot it for its final summary.
+        await self._finalize_session_summary()
+
+        # Reuse the /resume machinery: same path as picking the session in
+        # the session picker, including history replay in the UI.
+        session = ResumeSessionInfo(
+            session_id=result.session_id, cwd="", title=None, end_time=None
+        )
+        try:
+            await self._resume_local_session(session)
+        except Exception as e:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    f"Failed to resume session: {e}", collapsed=self._tools_collapsed
+                )
+            )
+
+    async def _secrets_command(self, cmd_args: str = "", **kwargs: Any) -> None:
+        router = self.agent_loop.privacy_router
+        args = cmd_args.strip()
+
+        if args.lower().startswith("delete "):
+            placeholder = args[7:].strip()
+            if router.vault.forget(placeholder):
+                await self._mount_and_scroll(
+                    UserCommandMessage(f"Deleted `{placeholder}` from the vault.")
+                )
+            else:
+                await self._mount_and_scroll(
+                    ErrorMessage(
+                        f"No vault entry named {placeholder}.",
+                        collapsed=self._tools_collapsed,
+                    )
+                )
+            return
+
+        placeholders = router.vault.placeholders()
+        if not placeholders:
+            await self._mount_and_scroll(
+                UserCommandMessage(
+                    "The privacy vault is empty. Secrets detected in "
+                    "conversations are redacted and stored here automatically."
+                )
+            )
+            return
+
+        lines = [f"- `{p}`" for p in sorted(placeholders)]
+        await self._mount_and_scroll(
+            UserCommandMessage(
+                "## Privacy vault\n\nSecret values live in the OS keychain and "
+                "are never shown. The cloud model only ever sees these "
+                "placeholders:\n\n"
+                + "\n".join(lines)
+                + "\n\nRemove one with `/secrets delete <placeholder>`."
+            )
+        )
+
+    async def _protect_command(self, cmd_args: str = "", **kwargs: Any) -> None:
+        settings = self.agent_loop.config.privacy_routing
+        args = cmd_args.strip()
+
+        if not settings.enabled:
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    "Privacy routing is disabled. Enable it in config.toml "
+                    "([privacy_routing] enabled = true) to use protected paths.",
+                    collapsed=self._tools_collapsed,
+                )
+            )
+            return
+
+        if not args:
+            user_paths = settings.protected_paths
+            lines = ["## Protected paths\n"]
+            lines.append("**Built-in (always on):**")
+            lines.extend(f"- `{p}`" for p in DEFAULT_PROTECTED_PATHS)
+            if user_paths:
+                lines.append("\n**Added by you:**")
+                lines.extend(f"- `{p}`" for p in user_paths)
+            lines.append(
+                "\nAdd with `/protect <glob>` (e.g. `/protect contracts/**`), "
+                "remove with `/protect remove <glob>`."
+            )
+            await self._mount_and_scroll(UserCommandMessage("\n".join(lines)))
+            return
+
+        if args.lower().startswith("remove "):
+            pattern = args[7:].strip()
+            current = list(settings.protected_paths)
+            if pattern not in current:
+                hint = (
+                    " (built-in defaults can't be removed)"
+                    if pattern in DEFAULT_PROTECTED_PATHS
+                    else ""
+                )
+                await self._mount_and_scroll(
+                    ErrorMessage(
+                        f"`{pattern}` is not in your protected paths{hint}.",
+                        collapsed=self._tools_collapsed,
+                    )
+                )
+                return
+            current.remove(pattern)
+            await self.agent_loop.config_orchestrator.set_field(
+                "/privacy_routing/protected_paths", current, reason="/protect remove"
+            )
+            await self._reload_config()
+            await self._mount_and_scroll(
+                UserCommandMessage(f"Removed `{pattern}` from protected paths.")
+            )
+            return
+
+        pattern = args
+        current = list(settings.protected_paths)
+        if pattern in current or pattern in DEFAULT_PROTECTED_PATHS:
+            await self._mount_and_scroll(
+                UserCommandMessage(f"`{pattern}` is already protected.")
+            )
+            return
+        current.append(pattern)
+        await self.agent_loop.config_orchestrator.set_field(
+            "/privacy_routing/protected_paths", current, reason="/protect add"
+        )
+        await self._reload_config()
+        await self._mount_and_scroll(
+            UserCommandMessage(
+                f"Protected `{pattern}`. The cloud model can no longer touch "
+                f"matching files; it will delegate to the local model instead."
+            )
+        )
 
     def _get_session_resume_info(self) -> str | None:
         if not self.agent_loop.session_logger.enabled:
@@ -3517,6 +3804,12 @@ class VibeApp(App):  # noqa: PLR0904
             return
 
         model_aliases = list(self.config.models)
+        # The privacy-routing private model is reserved for local_task
+        # delegation and redaction routing; it is not a general chat model
+        # (small local models choke on the full agentic prompt).
+        privacy = self.config.privacy_routing
+        if privacy.enabled and privacy.private_model in model_aliases:
+            model_aliases.remove(privacy.private_model)
         current_model = str(self.config.active_model)
         await self._switch_from_input(
             ModelPickerApp(model_aliases=model_aliases, current_model=current_model)
@@ -4257,6 +4550,13 @@ class VibeApp(App):  # noqa: PLR0904
         with suppress(Exception):
             await self._narrator_manager.close()
         with suppress(Exception):
+            # Final summary of the ending session; bounded by the finalize
+            # timeout so a slow network can't hold up quitting.
+            await self._finalize_session_summary(wait=True)
+        if self._session_summarizer is not None:
+            with suppress(Exception):
+                await self._session_summarizer.close()
+        with suppress(Exception):
             await self.agent_loop.aclose()
         try:
             await self.agent_loop.telemetry_client.aclose()
@@ -4499,6 +4799,33 @@ class VibeApp(App):  # noqa: PLR0904
         # Textual doesn't repaint after resuming from Ctrl+Z (SIGTSTP);
         # force a full layout refresh so the UI isn't garbled.
         self.refresh(layout=True)
+
+    def _get_session_summarizer(self) -> SessionSummarizer | None:
+        if self._session_summarizer is None:
+            result = create_narrator_backend(self.config)
+            if result is None:
+                return None
+            backend, model = result
+            self._session_summarizer = SessionSummarizer(
+                backend=backend,
+                model=model,
+                session_logger=self.agent_loop.session_logger,
+                messages_getter=lambda: list(self.agent_loop.messages),
+            )
+        return self._session_summarizer
+
+    def _checkpoint_session_summary(self) -> None:
+        """Refresh the background session summary once enough turns accrued."""
+        summarizer = self._get_session_summarizer()
+        if summarizer is not None:
+            summarizer.maybe_checkpoint()
+
+    async def _finalize_session_summary(self, *, wait: bool = False) -> None:
+        """Summarize the ending session (snapshots before any reset)."""
+        summarizer = self._get_session_summarizer()
+        if summarizer is not None:
+            await summarizer.finalize(wait=wait)
+            summarizer.reset()
 
     def _make_default_narrator_manager(self) -> NarratorManagerPort:
         return create_default_narrator_manager(

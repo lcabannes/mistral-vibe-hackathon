@@ -40,6 +40,7 @@ from vibe.core.config.models import (
     MissingAPIKeyError,
     ModelConfig,
     OtelRedactionMode,
+    PrivacyRoutingConfig,
     ProjectContextConfig,
     ProviderConfig,
     SessionLoggingConfig,
@@ -340,6 +341,7 @@ class VibeConfig(BaseSettings):
     )
 
     project_context: ProjectContextConfig = Field(default_factory=ProjectContextConfig)
+    privacy_routing: PrivacyRoutingConfig = Field(default_factory=PrivacyRoutingConfig)
     experiments: ExperimentsConfig = Field(default_factory=ExperimentsConfig)
     session_logging: SessionLoggingConfig = Field(default_factory=SessionLoggingConfig)
     tools: dict[str, dict[str, Any]] = Field(default_factory=dict)
@@ -675,6 +677,23 @@ class VibeConfig(BaseSettings):
                 f"Compaction model '{self.compaction_model.alias}' uses provider "
                 f"'{compaction_provider.name}' but active model uses provider "
                 f"'{active_provider.name}'. They must share the same provider."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_privacy_routing_model(self) -> VibeConfig:
+        if not self.privacy_routing.enabled or self.privacy_routing.mode != "route":
+            return self
+        alias = self.privacy_routing.private_model
+        if not alias:
+            raise ValueError(
+                "privacy_routing mode 'route' requires privacy_routing.private_model "
+                "to be set to a configured model alias."
+            )
+        if alias not in self.models:
+            raise ValueError(
+                f"Privacy routing private model '{alias}' is not in your "
+                f"configured models."
             )
         return self
 

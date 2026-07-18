@@ -20,7 +20,13 @@ from vibe.core.session.session_loader import (
     SessionLoader,
 )
 from vibe.core.session.title_format import MAX_TITLE_LENGTH
-from vibe.core.types import AgentStats, LLMMessage, Role, SessionMetadata
+from vibe.core.types import (
+    AgentStats,
+    LLMMessage,
+    Role,
+    SessionMetadata,
+    SessionSummary,
+)
 from vibe.core.utils import is_windows, utc_now
 from vibe.core.utils.io import read_safe, read_safe_async
 
@@ -468,6 +474,37 @@ class SessionLogger:
             metadata["loops"] = [
                 loop.model_dump(mode="json") for loop in session_metadata.loops
             ]
+            await SessionLogger.persist_metadata(metadata, session_dir)
+
+    async def persist_summary(
+        self, summary: SessionSummary, session_dir: Path | None = None
+    ) -> None:
+        """Persist a summary into ``session_dir`` (default: the live session).
+
+        Summaries are generated in the background and may complete after the
+        logger has already moved on to a new session (e.g. /clear), so callers
+        snapshot the directory of the session they summarized and pass it here.
+        """
+        session_info = self._get_session_info()
+        if session_info is None:
+            return
+        live_session_dir, session_metadata = session_info
+        if session_dir is None:
+            session_dir = live_session_dir
+        if session_dir == live_session_dir:
+            session_metadata.summary = summary
+        metadata_path = session_dir / METADATA_FILENAME
+        if not metadata_path.exists():
+            return
+        async with self._save_lock:
+            try:
+                raw = (await read_safe_async(metadata_path)).text
+                metadata = json.loads(raw)
+            except (OSError, json.JSONDecodeError) as e:
+                raise RuntimeError(
+                    f"Failed to read session metadata at {metadata_path}: {e}"
+                ) from e
+            metadata["summary"] = summary.model_dump(mode="json")
             await SessionLogger.persist_metadata(metadata, session_dir)
 
     async def persist_experiments(self, response: EvalResponse | None) -> None:

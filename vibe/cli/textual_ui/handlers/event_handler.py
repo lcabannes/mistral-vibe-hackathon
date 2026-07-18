@@ -12,8 +12,11 @@ from vibe.cli.textual_ui.widgets.messages import (
     AssistantMessage,
     HookRunContainer,
     HookSystemMessageLine,
+    LocalModelHeader,
+    LocalModelMessage,
     PlanFileMessage,
     ReasoningMessage,
+    WarningMessage,
 )
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.tools import ToolCallMessage, ToolResultMessage
@@ -33,9 +36,13 @@ from vibe.core.types import (
     CompactEndEvent,
     CompactStartEvent,
     ContextClearedEvent,
+    PermissionSuggestionEvent,
     PlanReviewEndedEvent,
     PlanReviewRequestedEvent,
+    PrivacyRouteEngagedEvent,
     ReasoningEvent,
+    RepeatedFailureEvent,
+    SecretRedactedEvent,
     SessionTitleUpdatedEvent,
     ToolCallEvent,
     ToolResultEvent,
@@ -74,6 +81,9 @@ class EventHandler:
         # tool call confirms them recoverable (stay muted), turn end escalates
         # them to hard errors.
         self._pending_error_results: list[ToolResultMessage] = []
+        # Prominent (first-class) stream widgets per tool call — local model
+        # responses rendered as chat output rather than collapsed tool noise.
+        self._prominent_streams: dict[str, LocalModelMessage] = {}
 
     async def _handle_hook_event(
         self, event: HookEvent, loading_widget: LoadingWidget | None = None
@@ -159,6 +169,33 @@ class EventHandler:
                 await self._handle_tool_result(sanitized_event)
             case ToolStreamEvent():
                 await self._handle_tool_stream(event)
+            case PrivacyRouteEngagedEvent():
+                await self.finalize_streaming()
+                await self._handle_privacy_route_engaged(event)
+            case SecretRedactedEvent():
+                await self.finalize_streaming()
+                await self._handle_secret_redacted(event)
+            case PermissionSuggestionEvent():
+                await self.mount_callback(
+                    WarningMessage(
+                        f"💡 You've approved `{event.tool_name}` "
+                        f"(`{event.pattern}`) {event.approval_count} times "
+                        f"across sessions. Consider a permanent rule in "
+                        f"config.toml: [tools.{event.tool_name}] "
+                        f'allowlist = ["{event.pattern}"]',
+                        show_border=False,
+                    )
+                )
+            case RepeatedFailureEvent():
+                await self.finalize_streaming()
+                await self.mount_callback(
+                    WarningMessage(
+                        f"⚠ The same `{event.tool_name}` call has now failed "
+                        f"{event.failure_count} times in a row. The agent may "
+                        f"be stuck — consider interrupting and redirecting it.",
+                        show_border=False,
+                    )
+                )
             case CompactStartEvent():
                 await self.finalize_streaming()
                 await self._handle_compact_start()
@@ -260,9 +297,23 @@ class EventHandler:
         self._resolve_pending_errors(escalate=True)
 
     async def _handle_tool_stream(self, event: ToolStreamEvent) -> None:
+        if event.prominent:
+            await self._handle_prominent_stream(event)
+            return
         tool_call = self.tool_calls.get(event.tool_call_id)
         if tool_call:
             tool_call.set_stream_message(event.message)
+
+    async def _handle_prominent_stream(self, event: ToolStreamEvent) -> None:
+        """Render a stream message as first-class chat output (local model)."""
+        widget = self._prominent_streams.get(event.tool_call_id)
+        if widget is None:
+            widget = LocalModelMessage(event.message)
+            self._prominent_streams[event.tool_call_id] = widget
+            await self.mount_callback(LocalModelHeader())
+            await self.mount_callback(widget)
+        else:
+            await widget.append_content(event.message)
 
     async def _handle_assistant_message(self, event: AssistantEvent) -> None:
         if self.current_streaming_reasoning is not None:
@@ -292,6 +343,32 @@ class EventHandler:
         else:
             await self.current_streaming_reasoning.append_content(event.content)
 
+    async def _handle_privacy_route_engaged(
+        self, event: PrivacyRouteEngagedEvent
+    ) -> None:
+        if event.model_alias == "(redacted in place)":
+            msg = (
+                f"Sensitive content detected ({event.rule_name}). "
+                f"Secrets are being redacted before reaching the cloud model."
+            )
+        else:
+            msg = (
+                f"Sensitive content detected ({event.rule_name}). "
+                f"This session is now routed to private model "
+                f"'{event.model_alias}'. Use /clear to return to the default model."
+            )
+        await self.mount_callback(WarningMessage(msg, show_border=False))
+
+    async def _handle_secret_redacted(self, event: SecretRedactedEvent) -> None:
+        await self.mount_callback(
+            WarningMessage(
+                f"🔒 Secret detected and redacted: the model only sees "
+                f"`{event.placeholder}`. The real value stayed in your OS "
+                f"keychain (inspect with /secrets).",
+                show_border=False,
+            )
+        )
+
     async def _handle_compact_start(self) -> None:
         compact_msg = CompactMessage()
         self.current_compact = compact_msg
@@ -315,6 +392,9 @@ class EventHandler:
         if self.current_streaming_message is not None:
             await self.current_streaming_message.stop_stream()
             self.current_streaming_message = None
+        for widget in self._prominent_streams.values():
+            await widget.stop_stream()
+        self._prominent_streams.clear()
 
     def stop_current_tool_call(
         self, success: bool = True, *, cancelled: bool = False

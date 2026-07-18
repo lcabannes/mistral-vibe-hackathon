@@ -43,6 +43,47 @@ class ProjectContextConfig(BaseSettings):
     timeout_seconds: float = 2.0
 
 
+class PrivacyRoutingConfig(BaseSettings):
+    model_config = SettingsConfigDict(extra="ignore")
+
+    enabled: bool = False
+    # "redact": keep the active model but replace detected secrets with local
+    #   placeholders at the API boundary (rehydrated in returning tool calls).
+    # "route": pin the whole session to private_model once a secret appears.
+    mode: Literal["redact", "route"] = "redact"
+    # Alias of the model sensitive conversations are routed to in "route" mode
+    # (typically a local or on-prem deployment). Must be present in [models].
+    private_model: str = ""
+    # Extra regexes (fullmatch not required; searched) treated as sensitive.
+    custom_patterns: list[str] = Field(default_factory=list)
+    # Globs (relative or absolute, ~ expanded) the cloud-facing loop may never
+    # touch; operations on them must be delegated to the local model via the
+    # local_task tool. Merged with DEFAULT_PROTECTED_PATHS.
+    protected_paths: list[str] = Field(default_factory=list)
+    # Command to launch the local model server when its endpoint is down at
+    # session start, e.g. "ollama serve" or
+    # "llama-server -m /path/model.gguf --port 8080". The port is whatever the
+    # provider's api_base says — keep the two consistent. Empty = never start.
+    local_server_command: str = ""
+    # Seconds to wait for the endpoint to come up after auto-starting.
+    local_server_startup_timeout: float = 30.0
+    # Send a 1-token completion at session start so the server loads model
+    # weights before the first real (sensitive) task needs them.
+    warmup: bool = True
+
+    @field_validator("custom_patterns")
+    @classmethod
+    def _validate_patterns(cls, patterns: list[str]) -> list[str]:
+        for pattern in patterns:
+            try:
+                re.compile(pattern)
+            except re.error as e:
+                raise ValueError(
+                    f"Invalid privacy_routing custom pattern {pattern!r}: {e}"
+                ) from e
+        return patterns
+
+
 class ExperimentsConfig(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore")
 

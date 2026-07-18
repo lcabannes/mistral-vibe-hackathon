@@ -819,6 +819,36 @@ This affects where Vibe looks for:
 - `tools/` - Custom tools
 - `logs/` - Session logs
 
+## Privacy Routing
+
+Privacy routing keeps secrets and sensitive files on your machine while you keep using a powerful cloud model as the orchestrator. Three complementary layers:
+
+1. **Secret redaction (vault)** — credential-shaped content (AWS keys, GitHub/Slack tokens, private keys, JWTs, hardcoded passwords, dotenv secrets) is detected with strict pattern rules and replaced with stable placeholders like `[REDACTED:aws-access-key-id:1]` before any request leaves your machine. The real values are stored in your OS keychain and survive across sessions — the same secret always maps to the same placeholder. When the model echoes a placeholder back in a tool call (e.g. writing a key into a config file), the real value is restored locally before the tool runs. Inspect the vault with `/secrets`; delete entries with `/secrets delete <placeholder>`.
+
+2. **Protected paths** — files like `.env*`, `*.pem`, `*.key`, `~/.ssh/**`, and `~/.aws/**` (plus your own `protected_paths` globs) are off-limits to the cloud-facing loop entirely: `read`, `write`, `edit`, `grep`, and `bash` operations touching them are denied with a redirect.
+
+3. **Local task delegation (`local_task`)** — the cloud model delegates protected-file operations to a subagent pinned to your local/private model. The local agent has full access, streams its activity to your screen, and returns **only** completion status to the cloud context — no content ever crosses back.
+
+```toml
+[privacy_routing]
+enabled = true
+mode = "redact"                      # or "route": pin the whole session to private_model
+private_model = "devstral-local"     # required for local_task and "route" mode
+protected_paths = ["contracts/**"]   # extends the built-in defaults
+custom_patterns = ['INTERNAL-\d+']   # extra regexes treated as secrets
+
+[[providers]]
+name = "local"
+api_base = "http://localhost:11434/v1"
+
+[[models]]
+alias = "devstral-local"
+name = "devstral"
+provider = "local"
+```
+
+Run the local model with e.g. [Ollama](https://ollama.com): `ollama pull devstral && ollama serve`.
+
 ## Editors/IDEs
 
 Mistral Vibe can be used in text editors and IDEs that support [Agent Client Protocol](https://agentclientprotocol.com/overview/clients). See the [ACP Setup documentation](docs/acp-setup.md) for setup instructions for various editors and IDEs.

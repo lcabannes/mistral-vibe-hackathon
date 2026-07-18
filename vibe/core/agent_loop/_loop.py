@@ -43,6 +43,7 @@ from vibe.core.experiments.session import (
     hydrate_experiments_from_session as session_hydrate_experiments_from_session,
     initialize_experiments as session_initialize_experiments,
 )
+from vibe.core.failure_ledger import FailureLedger, failure_key
 from vibe.core.hooks.manager import HooksManager
 from vibe.core.hooks.models import HookConfigResult, HookEvent
 from vibe.core.llm.backend.factory import create_backend
@@ -71,10 +72,18 @@ from vibe.core.middleware import (
     TurnLimitMiddleware,
     make_plan_agent_reminder,
 )
+from vibe.core.path_guard import (
+    find_protected_path_in_args,
+    protected_path_message,
+    protection_patterns,
+)
+from vibe.core.permission_stats import PermissionStats
 from vibe.core.plan_session import PlanSession
+from vibe.core.privacy_routing import PrivacyRouter, find_sensitive_match
 from vibe.core.review import ReviewManager
 from vibe.core.rewind import RewindManager
 from vibe.core.scratchpad import init_scratchpad
+from vibe.core.secret_store import PersistentSecretStore
 from vibe.core.session.session_id import extract_suffix, generate_session_id
 from vibe.core.session.session_logger import SessionLogger
 from vibe.core.session.session_migration import migrate_sessions_entrypoint
@@ -147,13 +156,17 @@ from vibe.core.types import (
     LLMMessage,
     LLMUsage,
     MessageList,
+    PermissionSuggestionEvent,
     PlanReviewEndedEvent,
     PlanReviewRequestedEvent,
+    PrivacyRouteEngagedEvent,
     RateLimitError,
     ReasoningEvent,
     RefusalError,
+    RepeatedFailureEvent,
     ResponseTooLongError,
     Role,
+    SecretRedactedEvent,
     SessionTitleUpdatedEvent,
     StrToolChoice,
     ToolCall,
@@ -249,6 +262,10 @@ class _PreparedReload:
     skill_manager: SkillManager
     system_prompt: str
     config_source: _SwappableConfigSource
+
+
+# Consecutive identical-call failures before the user is warned.
+REPEATED_FAILURE_THRESHOLD = 5
 
 
 class AgentLoopError(Exception):
@@ -366,6 +383,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         mcp_registry: MCPRegistry | None = None,
         cache_store: VibeCodeCacheStore | None = None,
         force_bypass_tool_permissions: bool = False,
+        bypass_path_guard: bool = False,
     ) -> None:
         self._config_orchestrator = config_orchestrator
         config = config_orchestrator.config
@@ -422,6 +440,25 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
 
         self._injected_backend = backend
         self.backend = self.backend_factory()
+        self._privacy_router = PrivacyRouter(
+            lambda: self.config,
+            secret_store=PersistentSecretStore()
+            if config.privacy_routing.enabled
+            else None,
+        )
+        # True inside local_task subagents: they run entirely against the
+        # private model, so protected paths are safe to touch there.
+        self._bypass_path_guard = bypass_path_guard
+        # Backends for models routed to a non-active provider (privacy routing),
+        # keyed by provider name and created lazily.
+        self._routed_backends: dict[str, BackendLike] = {}
+        # Consecutive failures per identical tool call (session-scoped) and
+        # cross-session approval counts for allowlist suggestions.
+        self._failure_ledger = FailureLedger()
+        self._permission_stats = PermissionStats() if not is_subagent else None
+        # Notices produced deep in the tool pipeline (approvals, repeated
+        # failures) surface at the next event-yield opportunity.
+        self._pending_notice_events: list[BaseEvent] = []
         self._sampling_handler = self._create_sampling_handler(
             backend_getter=lambda: self.backend,
             config_getter=lambda: self.config,
@@ -731,6 +768,10 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 await self._mcp_pool.aclose()
         with contextlib.suppress(Exception):
             await self.backend.__aexit__(None, None, None)
+        for routed_backend in self._routed_backends.values():
+            with contextlib.suppress(Exception):
+                await routed_backend.__aexit__(None, None, None)
+        self._routed_backends.clear()
         with contextlib.suppress(Exception):
             await self.experiment_manager.aclose()
 
@@ -826,6 +867,10 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         """Rebuild and replace the system prompt with current tool/skill state."""
         self.messages.update_system_prompt(self._build_system_prompt())
 
+    @property
+    def privacy_router(self) -> PrivacyRouter:
+        return self._privacy_router
+
     def backend_factory(self, config: AnyVibeConfig | None = None) -> BackendLike:
         return self._injected_backend or self._select_backend(config)
 
@@ -845,6 +890,27 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 is not None
             ),
         )
+
+    def _backend_for_provider(self, provider: ProviderConfig) -> BackendLike:
+        """Backend for a call's resolved provider.
+
+        Privacy routing can pick a model whose provider differs from the active
+        one; those get a lazily created, cached backend instead of the main one.
+        """
+        if self._injected_backend is not None:
+            return self._injected_backend
+        try:
+            if provider.name == self.config.get_active_provider().name:
+                return self.backend
+        except ValueError:
+            pass
+        if provider.name not in self._routed_backends:
+            self._routed_backends[provider.name] = create_backend(
+                provider=provider,
+                timeout=self.config.api_timeout,
+                retry_max_elapsed_time=self.config.api_retry_max_elapsed_time,
+            )
+        return self._routed_backends[provider.name]
 
     async def _save_messages(self, *, allow_empty: bool = False) -> None:
         await self.session_logger.save_interaction(
@@ -1528,6 +1594,56 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         return None
 
     async def _perform_llm_turn(self) -> AsyncGenerator[BaseEvent, None]:
+        # Surface notices queued by the tool pipeline (approval-threshold
+        # suggestions) at the turn boundary.
+        while self._pending_notice_events:
+            yield self._pending_notice_events.pop(0)
+        # Pre-scan so the routing notice lands before the assistant response
+        # starts; _complete/_chat_streaming still scan for mid-turn tool output.
+        self._privacy_router.scan(self.messages)
+        if notice := self._privacy_router.consume_notice():
+            yield PrivacyRouteEngagedEvent(
+                rule_name=notice.rule_name, model_alias=notice.model_alias
+            )
+        # Redact-mode notice, surfaced BEFORE the model responds: pre-redact
+        # the pending messages (idempotent — the real call re-redacts to the
+        # same stable placeholders) so newly used secrets are announced first.
+        # Only a secret in the MOST RECENT message makes this a redaction
+        # turn; placeholders lingering from earlier turns don't re-trigger.
+        fresh_redaction = False
+        if self._privacy_router.redact_mode_active:
+            self._privacy_router.redact_for_wire(self.messages)
+            newly_used = self._privacy_router.vault.consume_unannounced()
+            last = self.messages[-1] if len(self.messages) else None
+            fresh_redaction = bool(newly_used) and bool(
+                last
+                and last.content
+                and find_sensitive_match(
+                    last.content, self._privacy_router.custom_rules()
+                )
+            )
+            for placeholder in newly_used:
+                yield SecretRedactedEvent(placeholder=placeholder)
+            if fresh_redaction:
+                self.messages.append(
+                    LLMMessage(
+                        role=Role.user,
+                        content=(
+                            f"<{VIBE_WARNING_TAG}>A confidential value was "
+                            f"detected in the previous message. It was redacted "
+                            f"before reaching you and stored securely on the "
+                            f"user's machine, accessible only to the local "
+                            f"model. Inform the user of exactly this — do not "
+                            f"warn about credential exposure (nothing was "
+                            f"exposed), do not lecture about pasting secrets, "
+                            f"and do not call any tools this turn. Then ask "
+                            f"how they would like to proceed."
+                            f"</{VIBE_WARNING_TAG}>"
+                        ),
+                        injected=True,
+                    )
+                )
+
         if self.enable_streaming:
             async for event in self._stream_assistant_events():
                 yield event
@@ -1537,6 +1653,13 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 yield assistant_event
 
         last_message = self.messages[-1]
+
+        # A fresh redaction turn is acknowledge-only: no function calls may
+        # execute alongside a just-redacted secret.
+        if fresh_redaction and last_message.tool_calls:
+            last_message.tool_calls = None
+
+        self._rehydrate_tool_call_secrets(last_message)
 
         parsed = self.format_handler.parse_message(last_message)
         resolved = self.format_handler.resolve_tool_calls(parsed, self.tool_manager)
@@ -1613,7 +1736,13 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
 
     async def _handle_tool_calls(
         self, resolved: ResolvedMessage
-    ) -> AsyncGenerator[ToolCallEvent | ToolResultEvent | ToolStreamEvent | HookEvent]:
+    ) -> AsyncGenerator[
+        ToolCallEvent
+        | ToolResultEvent
+        | ToolStreamEvent
+        | HookEvent
+        | RepeatedFailureEvent
+    ]:
         async for event in self._emit_failed_tool_events(resolved.failed_calls):
             yield event
         if not resolved.tool_calls:
@@ -1650,10 +1779,21 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
 
     async def _run_tools_concurrently(
         self, tool_calls: list[ResolvedToolCall]
-    ) -> AsyncGenerator[ToolCallEvent | ToolResultEvent | ToolStreamEvent | HookEvent]:
+    ) -> AsyncGenerator[
+        ToolCallEvent
+        | ToolResultEvent
+        | ToolStreamEvent
+        | HookEvent
+        | RepeatedFailureEvent
+    ]:
         """Execute multiple tool calls concurrently, yielding events as they arrive."""
         queue: asyncio.Queue[
-            ToolCallEvent | ToolResultEvent | ToolStreamEvent | HookEvent | None
+            ToolCallEvent
+            | ToolResultEvent
+            | ToolStreamEvent
+            | HookEvent
+            | RepeatedFailureEvent
+            | None
         ] = asyncio.Queue()
 
         tasks = [
@@ -1696,7 +1836,12 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self,
         tc: ResolvedToolCall,
         queue: asyncio.Queue[
-            ToolCallEvent | ToolResultEvent | ToolStreamEvent | HookEvent | None
+            ToolCallEvent
+            | ToolResultEvent
+            | ToolStreamEvent
+            | HookEvent
+            | RepeatedFailureEvent
+            | None
         ],
     ) -> None:
         """Run a single tool call, sending events to the queue."""
@@ -1705,7 +1850,9 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
 
     async def _process_one_tool_call(
         self, tool_call: ResolvedToolCall
-    ) -> AsyncGenerator[ToolResultEvent | ToolStreamEvent | HookEvent]:
+    ) -> AsyncGenerator[
+        ToolResultEvent | ToolStreamEvent | HookEvent | RepeatedFailureEvent
+    ]:
         async with tool_span(
             tool_name=tool_call.tool_name,
             call_id=tool_call.call_id,
@@ -1716,12 +1863,35 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
 
     async def _execute_tool_call(
         self, span: trace.Span, tool_call: ResolvedToolCall
-    ) -> AsyncGenerator[ToolResultEvent | ToolStreamEvent | HookEvent]:
+    ) -> AsyncGenerator[
+        ToolResultEvent | ToolStreamEvent | HookEvent | RepeatedFailureEvent
+    ]:
         try:
             tool_instance = self.tool_manager.get(tool_call.tool_name)
         except Exception as exc:
             error_msg = f"Error getting tool '{tool_call.tool_name}': {exc}"
             yield self._tool_failure_event(tool_call, error_msg, span=span)
+            return
+
+        if not self._bypass_path_guard and (
+            protected := find_protected_path_in_args(
+                tool_call.tool_name,
+                tool_call.validated_args,
+                protection_patterns(self.config),
+            )
+        ):
+            error_msg = (
+                f"<{TOOL_ERROR_TAG}>{protected_path_message(protected)}"
+                f"</{TOOL_ERROR_TAG}>"
+            )
+            self.stats.tool_calls_failed += 1
+            yield ToolResultEvent(
+                tool_name=tool_call.tool_name,
+                tool_class=tool_call.tool_class,
+                error=error_msg,
+                tool_call_id=tool_call.call_id,
+            )
+            self._handle_tool_response(tool_call, error_msg, "failure", span=span)
             return
 
         try:
@@ -1800,6 +1970,8 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 self.stats.tool_calls_rejected += 1
             else:
                 self.stats.tool_calls_failed += 1
+                for ev in self._track_tool_failure(tool_call):
+                    yield ev
             yield ToolResultEvent(
                 tool_name=tool_call.tool_name,
                 tool_class=tool_call.tool_class,
@@ -1826,7 +1998,9 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         decision: ToolDecision,
         *,
         span: trace.Span,
-    ) -> AsyncGenerator[ToolResultEvent | ToolStreamEvent | HookEvent]:
+    ) -> AsyncGenerator[
+        ToolResultEvent | ToolStreamEvent | HookEvent | RepeatedFailureEvent
+    ]:
         self.stats.tool_calls_agreed += 1
 
         snapshot = await asyncio.to_thread(
@@ -1898,6 +2072,22 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         ):
             yield ev
         self.stats.tool_calls_succeeded += 1
+        self._failure_ledger.record_success(
+            failure_key(tool_call.tool_name, tool_call.args_dict)
+        )
+
+    def _track_tool_failure(
+        self, tool_call: ResolvedToolCall
+    ) -> list[RepeatedFailureEvent]:
+        """Count consecutive failures of this exact call; warn at threshold."""
+        count = self._failure_ledger.record_failure(
+            failure_key(tool_call.tool_name, tool_call.args_dict)
+        )
+        if count >= REPEATED_FAILURE_THRESHOLD:
+            return [
+                RepeatedFailureEvent(tool_name=tool_call.tool_name, failure_count=count)
+            ]
+        return []
 
     async def _should_execute_tool(
         self, tool: BaseTool, args: BaseModel, tool_call_id: str
@@ -1964,12 +2154,30 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         match response:
             case ApprovalResponse.YES:
                 verdict = ToolExecutionResponse.EXECUTE
+                self._record_approvals(tool_name, required_permissions)
             case _:
                 verdict = ToolExecutionResponse.SKIP
 
         return ToolDecision(
             verdict=verdict, approval_type=ToolPermission.ASK, feedback=feedback
         )
+
+    def _record_approvals(
+        self, tool_name: str, required_permissions: list[RequiredPermission]
+    ) -> None:
+        """Count manual approvals; queue an allowlist suggestion at threshold."""
+        if self._permission_stats is None:
+            return
+        patterns = [rp.session_pattern for rp in required_permissions] or [tool_name]
+        for pattern in patterns:
+            count = self._permission_stats.record_approval(tool_name, pattern)
+            if self._permission_stats.should_suggest(tool_name, pattern):
+                self._permission_stats.mark_suggested(tool_name, pattern)
+                self._pending_notice_events.append(
+                    PermissionSuggestionEvent(
+                        tool_name=tool_name, pattern=pattern, approval_count=count
+                    )
+                )
 
     def _handle_tool_response(
         self,
@@ -2019,6 +2227,9 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
     def _messages_for_backend(
         self, messages: Sequence[LLMMessage], active_model: ModelConfig
     ) -> Sequence[LLMMessage]:
+        # Egress boundary: in redact mode, secrets leave the process only as
+        # placeholders; the in-memory/persisted history keeps real values.
+        messages = self._privacy_router.redact_for_wire(messages)
         if active_model.supports_images:
             return messages
         if not any(m.images for m in messages):
@@ -2026,6 +2237,22 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         return [
             m.model_copy(update={"images": None}) if m.images else m for m in messages
         ]
+
+    def _rehydrate_tool_call_secrets(self, message: LLMMessage) -> None:
+        """Restore secrets in tool-call arguments so tools see real values.
+
+        The model only saw placeholders and may echo them back in its tool
+        calls; before validation or execution the real values must be spliced
+        back in. Mutates the ToolCall objects in place since they haven't been
+        serialized to the session yet (this runs before parse/resolve).
+        """
+        if not message.tool_calls:
+            return
+        for call in message.tool_calls:
+            if call.function.arguments:
+                call.function.arguments = self._privacy_router.rehydrate_tool_arguments(
+                    call.function.arguments
+                )
 
     def count_history_images_unsupported_by_active_model(self) -> int:
         try:
@@ -2053,7 +2280,10 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         non-streaming call (including compaction) goes through, so usage
         accounting can never be skipped.
         """
+        self._privacy_router.scan(messages)
+        model = self._privacy_router.apply(model)
         provider = self.config.get_provider_for_model(model)
+        backend = self._backend_for_provider(provider)
         backend_metadata = self._build_backend_metadata(call_type)
 
         last_user_message = next(
@@ -2076,7 +2306,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
 
         try:
             start_time = time.perf_counter()
-            result = await self.backend.complete(
+            result = await backend.complete(
                 model=model,
                 messages=self._messages_for_backend(messages, model),
                 temperature=model.temperature,
@@ -2141,8 +2371,10 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         return result
 
     async def _chat_streaming(self) -> AsyncGenerator[LLMChunk]:
-        active_model = self.config.get_active_model()
-        provider = self.config.get_active_provider()
+        self._privacy_router.scan(self.messages)
+        active_model = self._privacy_router.apply(self.config.get_active_model())
+        provider = self.config.get_provider_for_model(active_model)
+        backend = self._backend_for_provider(provider)
         backend_metadata = self._build_backend_metadata()
 
         available_tools = self.format_handler.get_available_tools(self.tool_manager)
@@ -2167,13 +2399,13 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             start_time = time.perf_counter()
             usage = LLMUsage()
             chunk_agg: LLMChunk | None = None
-            async for chunk in self.backend.complete_streaming(
+            async for chunk in backend.complete_streaming(
                 model=active_model,
                 messages=self._messages_for_backend(self.messages, active_model),
                 temperature=active_model.temperature,
                 tools=available_tools,
                 tool_choice=tool_choice,
-                extra_headers=self._get_extra_headers(),
+                extra_headers=self._get_extra_headers(provider),
                 max_tokens=self._max_tokens,
                 metadata=backend_metadata.model_dump(exclude_none=True),
             ):
@@ -2364,6 +2596,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             self.agent_profile,
         )
         self.messages.reset(self.messages[:1])
+        self._privacy_router.reset()
 
         self.stats = AgentStats.create_fresh(self.stats)
         self.stats.trigger_listeners()

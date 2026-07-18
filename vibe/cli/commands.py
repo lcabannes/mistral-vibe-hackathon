@@ -96,6 +96,21 @@ class CommandRegistry:
                 description="Compact conversation history by summarizing. Optionally pass instructions to guide the summary",
                 handler="_compact_history",
             ),
+            "recall": Command(
+                aliases=frozenset(["/recall"]),
+                description="Search past session summaries. Usage: /recall <keywords> (search), /recall use <n> (inject as context), /recall resume <n> (re-enter session)",
+                handler="_recall_command",
+            ),
+            "secrets": Command(
+                aliases=frozenset(["/secrets"]),
+                description="List redacted secrets in the privacy vault (names only, never values). Usage: /secrets, /secrets delete <placeholder>",
+                handler="_secrets_command",
+            ),
+            "protect": Command(
+                aliases=frozenset(["/protect"]),
+                description="Manage protected paths (cloud model can't read them; use local_task). Usage: /protect (list), /protect <glob>, /protect remove <glob>",
+                handler="_protect_command",
+            ),
             "exit": Command(
                 aliases=frozenset(["/exit", "exit", "quit", ":q", ":quit"]),
                 description="Exit the application",

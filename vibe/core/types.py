@@ -149,6 +149,15 @@ class SessionInfo(BaseModel):
     save_dir: str
 
 
+class SessionSummary(BaseModel):
+    summary: str
+    tags: list[str] = Field(default_factory=list)
+    generated_at: str
+    # Number of non-system messages covered by the summary; a session with
+    # more messages than this has a stale summary.
+    message_count: int
+
+
 class SessionMetadata(BaseModel):
     session_id: str
     parent_session_id: str | None = None
@@ -162,6 +171,7 @@ class SessionMetadata(BaseModel):
     title: str | None = None
     title_source: Literal["auto", "manual"] = "auto"
     experiments: EvalResponse | None = None
+    summary: SessionSummary | None = None
 
 
 StrToolChoice = Literal["auto", "none", "any", "required"]
@@ -510,12 +520,47 @@ class ToolStreamEvent(BaseEvent):
     tool_name: str
     message: str
     tool_call_id: str
+    # Prominent stream messages render as first-class chat output (used for
+    # local_task: the private model's answer is shown to the user directly
+    # and never enters the cloud-visible context).
+    prominent: bool = False
 
 
 class WaitingForInputEvent(BaseEvent):
     task_id: str
     label: str | None = None
     predefined_answers: list[str] | None = None
+
+
+class PrivacyRouteEngagedEvent(BaseEvent):
+    """Sensitive content was detected; the session is now pinned to a private model."""
+
+    rule_name: str
+    model_alias: str
+
+
+class SecretRedactedEvent(BaseEvent):
+    """A secret was replaced with this placeholder before leaving the machine.
+
+    Emitted once per placeholder per session, before the model's response.
+    """
+
+    placeholder: str
+
+
+class PermissionSuggestionEvent(BaseEvent):
+    """A permission has been manually approved often enough to suggest a rule."""
+
+    tool_name: str
+    pattern: str
+    approval_count: int
+
+
+class RepeatedFailureEvent(BaseEvent):
+    """The same tool call keeps failing; the user should probably intervene."""
+
+    tool_name: str
+    failure_count: int
 
 
 class CompactStartEvent(BaseEvent):

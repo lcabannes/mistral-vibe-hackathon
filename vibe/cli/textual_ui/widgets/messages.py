@@ -316,6 +316,31 @@ class AssistantMessage(StreamingMessageBase):
         yield markdown
 
 
+LOCAL_MODEL_HEADER = "🔒 Local model (private — never sent to the cloud)"
+
+
+class LocalModelHeader(NoMarkupStatic):
+    """Origin marker mounted above a private-model response."""
+
+    def __init__(self) -> None:
+        super().__init__(LOCAL_MODEL_HEADER)
+        self.add_class("local-model-header")
+
+
+class LocalModelMessage(AssistantMessage):
+    """A private-model response shown as first-class chat output.
+
+    Same rendering as an assistant message (full markdown, never collapsed);
+    the ``LocalModelHeader`` mounted above it marks the origin. Kept as a
+    subclass of AssistantMessage so it inherits the single-Markdown stream
+    layout unchanged — adding a second child here breaks that layout.
+    """
+
+    def __init__(self, content: str) -> None:
+        super().__init__(content)
+        self.add_class("local-model-message")
+
+
 class ReasoningMessage(ClickWithoutDragMixin, SpinnerMixin, StreamingMessageBase):
     SPINNER_TYPE = SpinnerType.PULSE
     SPINNING_TEXT = "Thinking"

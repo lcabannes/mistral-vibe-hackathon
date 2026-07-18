@@ -395,6 +395,12 @@ Markdown {
     }
 }
 
+.local-model-header {
+    color: $success;
+    text-style: bold;
+    margin-top: 1;
+}
+
 .assistant-message {
     layout: stream;
     margin-top: 1;
