@@ -512,6 +512,25 @@ class ToolStreamEvent(BaseEvent):
     tool_call_id: str
 
 
+class SubagentLifecycleState(StrEnum):
+    RUNNING = auto()
+    WORKING = auto()
+    ATTENTION = auto()
+    FAILED = auto()
+    COMPLETED = auto()
+    CANCELLED = auto()
+
+
+class SubagentLifecycleEvent(ToolStreamEvent):
+    agent_name: str
+    agent_display_name: str
+    task: str
+    child_session_id: str
+    state: SubagentLifecycleState
+    current_activity: str | None = None
+    terminal_usage: LLMUsage | None = None
+
+
 class WaitingForInputEvent(BaseEvent):
     task_id: str
     label: str | None = None

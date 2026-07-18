@@ -4,11 +4,20 @@ from pathlib import Path
 
 import pytest
 
+from tests.conftest import build_test_vibe_config
 from vibe.acp.acp_agent_loop import VibeAcpAgentLoop
 from vibe.core.agents.models import BuiltinAgentName
 
 
 class TestACPSetMode:
+    def test_create_agent_loop_rejects_orchestrator(
+        self, acp_agent_loop: VibeAcpAgentLoop
+    ) -> None:
+        with pytest.raises(ValueError, match="not available through the ACP"):
+            acp_agent_loop._create_agent_loop(
+                build_test_vibe_config(), BuiltinAgentName.ORCHESTRATOR
+            )
+
     @pytest.mark.asyncio
     async def test_set_mode_to_default(self, acp_agent_loop: VibeAcpAgentLoop) -> None:
         session_response = await acp_agent_loop.new_session(
@@ -152,6 +161,27 @@ class TestACPSetMode:
         assert response is None
         assert acp_session.agent_loop.agent_profile.name == initial_agent
         assert acp_session.agent_loop.bypass_tool_permissions == initial_bypass
+
+    @pytest.mark.asyncio
+    async def test_set_mode_rejects_orchestrator(
+        self, acp_agent_loop: VibeAcpAgentLoop
+    ) -> None:
+        session_response = await acp_agent_loop.new_session(
+            cwd=str(Path.cwd()), mcp_servers=[]
+        )
+        session_id = session_response.session_id
+        acp_session = acp_agent_loop.sessions[session_id]
+
+        response = await acp_agent_loop.set_session_mode(
+            session_id=session_id, mode_id=BuiltinAgentName.ORCHESTRATOR
+        )
+
+        assert response is None
+        assert acp_session.agent_loop.agent_profile.name == BuiltinAgentName.DEFAULT
+        assert "control_cli" not in acp_session.agent_loop.tool_manager.available_tools
+        assert (
+            "manage_agents" not in acp_session.agent_loop.tool_manager.available_tools
+        )
 
     @pytest.mark.asyncio
     async def test_set_mode_to_same_mode(

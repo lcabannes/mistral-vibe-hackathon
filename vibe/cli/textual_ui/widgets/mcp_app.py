@@ -10,6 +10,7 @@ from textual.binding import Binding, BindingType
 from textual.containers import Container, Vertical
 from textual.events import DescendantBlur
 from textual.message import Message
+from textual.timer import Timer
 from textual.widgets import OptionList
 from textual.widgets.option_list import Option, OptionDoesNotExist
 from textual.worker import Worker
@@ -163,6 +164,9 @@ class MCPApp(Container):
         self._viewing_kind: MCPSourceKind | None = None
         self._refresh_callback = refresh_callback
         self._refreshing = False
+        self._refresh_active = False
+        self._refresh_timer: Timer | None = None
+        self._refresh_worker: Worker[Any] | None = None
 
     def compose(self) -> ComposeResult:
         with Vertical(id="mcp-content"):
@@ -173,10 +177,32 @@ class MCPApp(Container):
 
     def on_mount(self) -> None:
         self._refresh_view(self._viewing_server)
-        self.query_one(OptionList).focus()
-        if self._refresh_callback is not None:
+        if self.is_on_screen:
+            self.query_one(OptionList).focus()
+        self.set_refresh_active(self.is_on_screen)
+
+    def on_unmount(self) -> None:
+        self.set_refresh_active(False)
+
+    def set_refresh_active(self, active: bool) -> None:
+        if active == self._refresh_active:
+            return
+        self._refresh_active = active
+        if self._refresh_callback is None:
+            return
+        if active:
             self._start_refresh()
-            self.set_interval(_BACKGROUND_REFRESH_INTERVAL_SECONDS, self._start_refresh)
+            self._refresh_timer = self.set_interval(
+                _BACKGROUND_REFRESH_INTERVAL_SECONDS, self._start_refresh
+            )
+            return
+        if self._refresh_timer is not None:
+            self._refresh_timer.stop()
+            self._refresh_timer = None
+        if self.is_attached:
+            self.app.workers.cancel_group(self, "refresh")
+        self._refreshing = False
+        self._refresh_worker = None
 
     def refresh_index(self) -> None:
         """Re-snapshot the tool index (e.g. after deferred MCP discovery)."""
@@ -189,8 +215,28 @@ class MCPApp(Container):
             )
         self._rebuild_preserving_scroll()
 
+    def update_sources(
+        self,
+        mcp_servers: Sequence[MCPServer],
+        *,
+        tool_manager: ToolManager | None = None,
+        connector_registry: ConnectorRegistry | None = None,
+        mcp_registry: MCPRegistry | None = None,
+    ) -> None:
+        self._mcp_servers = tuple(mcp_servers)
+        if tool_manager is not None:
+            self._tool_manager = tool_manager
+        self._connector_registry = connector_registry
+        self._mcp_registry = mcp_registry
+        self._sync_mcp_registry()
+        self._connector_names = (
+            connector_registry.get_connector_names() if connector_registry else []
+        )
+        self._rebuild_preserving_scroll()
+
     def on_descendant_blur(self, _event: DescendantBlur) -> None:
-        self.query_one(OptionList).focus()
+        if self.is_on_screen:
+            self.query_one(OptionList).focus()
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         option_id = event.option.id or ""
@@ -226,10 +272,16 @@ class MCPApp(Container):
         self.post_message(self.MCPClosed())
 
     def _start_refresh(self) -> None:
-        if self._refresh_callback is None or self._refreshing:
+        if (
+            not self._refresh_active
+            or self._refresh_callback is None
+            or self._refreshing
+        ):
             return
         self._refreshing = True
-        self.run_worker(self._run_refresh(), exclusive=True, group="refresh")
+        self._refresh_worker = self.run_worker(
+            self._run_refresh, exclusive=True, group="refresh"
+        )
 
     async def _run_refresh(self) -> None:
         if self._refresh_callback is None:
@@ -237,11 +289,12 @@ class MCPApp(Container):
         await self._refresh_callback()
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
-        if event.worker.group != "refresh":
+        if event.worker.group != "refresh" or event.worker is not self._refresh_worker:
             return
         if event.worker.is_finished:
             self._refreshing = False
-            if not self.is_attached:
+            self._refresh_worker = None
+            if not self.is_attached or not self._refresh_active:
                 return
             self.refresh_index()
 

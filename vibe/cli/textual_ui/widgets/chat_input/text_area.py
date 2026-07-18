@@ -44,6 +44,7 @@ class ChatTextArea(TextArea):
     ALLOW_SELECT: ClassVar[bool] = False
 
     BINDINGS: ClassVar[list[Binding]] = [
+        Binding("shift+tab", "cycle_mode", "Cycle Mode", show=False, priority=True),
         Binding(
             "shift+enter,ctrl+j",
             "insert_newline",
@@ -96,6 +97,9 @@ class ChatTextArea(TextArea):
             self.mode = mode
             super().__init__()
 
+    class CycleMode(Message):
+        pass
+
     class ClipboardImagePasted(Message):
         """Posted when the OS clipboard should be probed for an image.
 
@@ -136,13 +140,13 @@ class ChatTextArea(TextArea):
         # app.clear_selection() and wipe an in-progress selection elsewhere.
         self.set_reactive(TextArea.selection, Selection.cursor(self.cursor_location))
         self.refresh()
-        if self._app_has_focus:
+        if self._app_has_focus and self.is_on_screen:
             self.call_after_refresh(self.focus)
 
     def set_app_focus(self, has_focus: bool) -> None:
         self._app_has_focus = has_focus
         self.cursor_blink = has_focus
-        if has_focus and not self.has_focus:
+        if has_focus and not self.has_focus and self.is_on_screen:
             self.call_after_refresh(self.focus)
 
     def on_click(self, event: events.Click) -> None:
@@ -179,6 +183,9 @@ class ChatTextArea(TextArea):
 
     def action_insert_newline(self) -> None:
         self.insert("\n")
+
+    def action_cycle_mode(self) -> None:
+        self.post_message(self.CycleMode())
 
     def action_paste_image_from_clipboard(self) -> None:
         self.post_message(self.ClipboardImagePasted(notify_when_empty=True))

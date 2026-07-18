@@ -335,6 +335,25 @@ def _get_headless_section() -> str:
     )
 
 
+def _get_orchestrator_section(tool_manager: ToolManager) -> str:
+    section = load_system_prompt("orchestrator")
+    available_tools = tool_manager.available_tools
+    capabilities: list[str] = []
+    if "control_cli" in available_tools:
+        capabilities.append(
+            "- Use `control_cli` only for actions advertised by its delivery adapter."
+        )
+    if "manage_agents" in available_tools:
+        capabilities.append(
+            "- Use `manage_agents` for the managed-agent operations exposed by its runtime."
+        )
+    if not capabilities:
+        capabilities.append(
+            "- No orchestrator control adapter is active; coordinate without claiming external control."
+        )
+    return f"{section}\n\n## Available controls\n\n" + "\n".join(capabilities)
+
+
 def get_universal_system_prompt(
     tool_manager: ToolManager,
     config: AnyVibeConfig,
@@ -346,6 +365,9 @@ def get_universal_system_prompt(
     experiment_manager: ExperimentManager | None = None,
 ) -> str:
     sections = [_interpolate_prompt(_resolve_system_prompt(config, experiment_manager))]
+
+    if config.enable_orchestrator_controls and not headless:
+        sections.append(_get_orchestrator_section(tool_manager))
 
     if headless:
         sections.append(_get_headless_section())

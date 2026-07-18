@@ -159,11 +159,18 @@ class TestAgentProfile:
         ]
         assert set(agents) == {
             BuiltinAgentName.DEFAULT,
+            BuiltinAgentName.ORCHESTRATOR,
             BuiltinAgentName.PLAN,
             BuiltinAgentName.ACCEPT_EDITS,
             BuiltinAgentName.AUTO_APPROVE,
             BuiltinAgentName.LEAN,
         }
+
+    def test_orchestrator_without_runtime_adapters_has_no_control_tools(self) -> None:
+        agent = build_test_agent_loop(agent_name=BuiltinAgentName.ORCHESTRATOR)
+
+        assert "manage_agents" not in agent.tool_manager.available_tools
+        assert "control_cli" not in agent.tool_manager.available_tools
 
 
 class TestAgentApplyToConfig:

@@ -1,0 +1,1253 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, ClassVar
+
+from rich.text import Text
+from textual import events
+from textual.app import ComposeResult
+from textual.containers import Container, Horizontal, Vertical, VerticalScroll
+from textual.message import Message
+from textual.timer import Timer
+from textual.widget import Widget
+from textual.widgets import OptionList, Static
+from textual.widgets.option_list import Option, OptionDoesNotExist
+
+from vibe.cli.textual_ui.widgets.navigable_option_list import NavigableOptionList
+from vibe.cli.textual_ui.workspace.models import (
+    AgentActivity,
+    AgentActivitySnapshot,
+    AgentRunState,
+)
+from vibe.core.agents.models import AgentProfile
+from vibe.core.types import AgentStats
+
+if TYPE_CHECKING:
+    from vibe.cli.textual_ui.widgets.mcp_app import MCPApp
+
+_WIDE_BREAKPOINT = 110
+_MEDIUM_BREAKPOINT = 82
+_ANIMATION_INTERVAL_SECONDS = 0.14
+_COMPACT_BASE = 1000
+_COMPACT_DECIMAL_THRESHOLD = 10
+_ACTIVE_STATES = frozenset({
+    AgentRunState.REQUESTED,
+    AgentRunState.RUNNING,
+    AgentRunState.WORKING,
+    AgentRunState.ATTENTION,
+})
+_STATE_RICH_STYLES = {
+    "state-idle": "dim",
+    "state-warning": "bold",
+    "state-working": "bold",
+    "state-attention": "bold",
+    "state-failed": "bold",
+    "state-finished": "bold",
+}
+
+
+def _state_presentation(state: AgentRunState) -> tuple[str, str, str]:
+    match state:
+        case AgentRunState.IDLE:
+            presentation = "○", "idle", "state-idle"
+        case AgentRunState.REQUESTED:
+            presentation = "◌", "queued", "state-warning"
+        case AgentRunState.RUNNING:
+            presentation = "◐", "running", "state-working"
+        case AgentRunState.WORKING:
+            presentation = "●", "working", "state-working"
+        case AgentRunState.ATTENTION:
+            presentation = "!", "attention", "state-attention"
+        case AgentRunState.FAILED:
+            presentation = "×", "failed", "state-failed"
+        case AgentRunState.COMPLETED:
+            presentation = "✓", "finished", "state-finished"
+        case AgentRunState.CANCELLED:
+            presentation = "○", "cancelled", "state-idle"
+        case AgentRunState.STOPPED:
+            presentation = "○", "stopped", "state-idle"
+    return presentation
+
+
+def _activity_line(activity: AgentActivity) -> Text:
+    glyph, state_label, style_class = _state_presentation(activity.state)
+    text = Text(no_wrap=True, overflow="ellipsis")
+    text.append(f"{glyph} {state_label:<9}", style=_STATE_RICH_STYLES[style_class])
+    if activity.owner_display_name:
+        text.append(activity.owner_display_name, style="bold")
+        text.append(" · ", style="dim")
+    text.append(activity.agent_display_name, style="bold")
+    text.append(f"  {activity.current_activity or activity.task}", style="dim")
+    return text
+
+
+def _activity_count_label(count: int, noun: str = "agent") -> str:
+    suffix = "" if count == 1 else "s"
+    return f"{count} {noun}{suffix}"
+
+
+def _compact_count(value: int) -> str:
+    units = ("", "K", "M", "B", "T")
+    scaled = float(value)
+    unit = units[0]
+    for unit in units:
+        if scaled < _COMPACT_BASE or unit == units[-1]:
+            break
+        scaled /= _COMPACT_BASE
+    if not unit:
+        return str(value)
+    precision = 1 if scaled < _COMPACT_DECIMAL_THRESHOLD else 0
+    return f"{scaled:.{precision}f}{unit}"
+
+
+def _activity_widget_id(tool_call_id: str) -> str:
+    return f"activity-{tool_call_id.encode().hex()}"
+
+
+@dataclass(frozen=True, slots=True)
+class HomeViewModel:
+    snapshot: AgentActivitySnapshot
+    system_summary: str = "System ready"
+    sync_summary: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class OfficeViewModel:
+    snapshot: AgentActivitySnapshot
+    scope_label: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AgentProfileViewModel:
+    name: str
+    display_name: str
+    description: str
+    safety: str
+    agent_type: str
+    install_required: bool
+
+    @classmethod
+    def from_profile(cls, profile: AgentProfile) -> AgentProfileViewModel:
+        return cls(
+            name=profile.name,
+            display_name=profile.display_name,
+            description=profile.description,
+            safety=profile.safety.value,
+            agent_type=profile.agent_type.value,
+            install_required=profile.install_required,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class AgentsViewModel:
+    profiles: tuple[AgentProfileViewModel, ...] = ()
+
+    @classmethod
+    def from_profiles(cls, profiles: tuple[AgentProfile, ...]) -> AgentsViewModel:
+        return cls(tuple(AgentProfileViewModel.from_profile(item) for item in profiles))
+
+
+@dataclass(frozen=True, slots=True)
+class UsageViewModel:
+    steps: int
+    prompt_tokens: int
+    completion_tokens: int
+    context_tokens: int
+    tool_calls_succeeded: int
+    tool_calls_failed: int
+    tool_calls_rejected: int
+    session_cost: float
+    last_turn_duration: float
+    tokens_per_second: float
+
+    @classmethod
+    def from_stats(cls, stats: AgentStats) -> UsageViewModel:
+        return cls(
+            steps=stats.steps,
+            prompt_tokens=stats.session_prompt_tokens,
+            completion_tokens=stats.session_completion_tokens,
+            context_tokens=stats.context_tokens,
+            tool_calls_succeeded=stats.tool_calls_succeeded,
+            tool_calls_failed=stats.tool_calls_failed,
+            tool_calls_rejected=(
+                stats.tool_calls_rejected + stats.tool_calls_hook_denied
+            ),
+            session_cost=stats.session_cost,
+            last_turn_duration=stats.last_turn_duration,
+            tokens_per_second=stats.tokens_per_second,
+        )
+
+
+class ResponsiveWorkspacePage(Container):
+    DEFAULT_CSS = """
+    ResponsiveWorkspacePage {
+        width: 1fr;
+        height: 1fr;
+        padding: 1 2;
+        background: transparent;
+        overflow: hidden;
+    }
+
+    ResponsiveWorkspacePage.narrow {
+        padding: 1;
+    }
+
+    .workspace-title {
+        height: 2;
+        color: $foreground;
+        text-style: bold;
+    }
+
+    .workspace-section-title {
+        height: 1;
+        margin-bottom: 1;
+        color: $primary;
+        text-style: bold;
+    }
+
+    .workspace-muted {
+        color: $text-muted;
+
+        &:ansi {
+            text-style: dim;
+        }
+    }
+    """
+
+    def on_mount(self) -> None:
+        self._set_layout_class(self.size.width)
+
+    def on_resize(self, event: events.Resize) -> None:
+        self._set_layout_class(event.size.width)
+
+    def _set_layout_class(self, width: int) -> None:
+        self.remove_class("wide", "medium", "narrow")
+        if width >= _WIDE_BREAKPOINT:
+            self.add_class("wide")
+        elif width >= _MEDIUM_BREAKPOINT:
+            self.add_class("medium")
+        else:
+            self.add_class("narrow")
+
+
+class AnimatedStateBorder(Static):
+    DEFAULT_CSS = """
+    AnimatedStateBorder {
+        width: 1fr;
+        height: 1;
+        color: $text-muted;
+        background: transparent;
+
+        &:ansi {
+            text-style: dim;
+        }
+    }
+
+    AnimatedStateBorder.state-working {
+        color: $primary;
+    }
+
+    AnimatedStateBorder.state-warning {
+        color: $warning;
+    }
+
+    AnimatedStateBorder.state-attention,
+    AnimatedStateBorder.state-failed {
+        color: $error;
+    }
+
+    AnimatedStateBorder.state-finished {
+        color: $success;
+    }
+    """
+
+    _ANIMATED_STATES: ClassVar[frozenset[AgentRunState]] = frozenset({
+        AgentRunState.RUNNING,
+        AgentRunState.WORKING,
+        AgentRunState.ATTENTION,
+    })
+
+    def __init__(self, state: AgentRunState, **kwargs: Any) -> None:
+        super().__init__("", **kwargs)
+        self.state = state
+        self._phase = 0
+        self._timer: Timer | None = None
+        self._apply_state_class()
+
+    @property
+    def is_animating(self) -> bool:
+        return self._timer is not None
+
+    def update_state(self, state: AgentRunState) -> None:
+        if state is self.state:
+            return
+        self.state = state
+        self._phase = 0
+        self._apply_state_class()
+        self._sync_timer()
+        self.refresh()
+
+    def on_mount(self) -> None:
+        self._sync_timer()
+
+    def on_show(self) -> None:
+        self._sync_timer()
+
+    def on_hide(self) -> None:
+        self._stop_timer()
+
+    def on_unmount(self) -> None:
+        self._stop_timer()
+
+    def render(self) -> Text:
+        width = max(1, self.size.width)
+        match self.state:
+            case AgentRunState.RUNNING | AgentRunState.WORKING:
+                track = Text("─" * width, style="dim")
+                start = self._phase % width
+                track.stylize("bold", start, min(width, start + 3))
+                return track
+            case AgentRunState.ATTENTION:
+                pattern = "──  "
+                offset = self._phase % len(pattern)
+                return Text(
+                    "".join(
+                        pattern[(index + offset) % len(pattern)]
+                        for index in range(width)
+                    )
+                )
+            case AgentRunState.COMPLETED:
+                return Text("─" * width)
+            case AgentRunState.FAILED:
+                return Text("━" * width)
+            case (
+                AgentRunState.IDLE
+                | AgentRunState.REQUESTED
+                | AgentRunState.CANCELLED
+                | AgentRunState.STOPPED
+            ):
+                return Text("·" * width)
+
+    def _tick(self) -> None:
+        self._phase += 1
+        self.refresh()
+
+    def _sync_timer(self) -> None:
+        should_animate = self.is_mounted and self.state in self._ANIMATED_STATES
+        if should_animate and self._timer is None:
+            self._timer = self.set_interval(_ANIMATION_INTERVAL_SECONDS, self._tick)
+        elif not should_animate:
+            self._stop_timer()
+
+    def _stop_timer(self) -> None:
+        if self._timer is None:
+            return
+        self._timer.stop()
+        self._timer = None
+
+    def _apply_state_class(self) -> None:
+        self.remove_class(
+            "state-idle",
+            "state-warning",
+            "state-working",
+            "state-attention",
+            "state-failed",
+            "state-finished",
+        )
+        self.add_class(_state_presentation(self.state)[2])
+
+
+class AgentStateRow(Static):
+    DEFAULT_CSS = """
+    AgentStateRow {
+        width: 1fr;
+        height: 1;
+        background: transparent;
+        color: $text-muted;
+
+        &:ansi {
+            text-style: dim;
+        }
+    }
+
+    AgentStateRow.state-working {
+        color: $primary;
+    }
+
+    AgentStateRow.state-warning {
+        color: $warning;
+    }
+
+    AgentStateRow.state-attention,
+    AgentStateRow.state-failed {
+        color: $error;
+    }
+
+    AgentStateRow.state-finished {
+        color: $success;
+    }
+    """
+
+    def __init__(self, state: AgentRunState, **kwargs: Any) -> None:
+        super().__init__("", **kwargs)
+        self.state = state
+        self.update_state(state)
+
+    def update_state(self, state: AgentRunState) -> None:
+        self.state = state
+        glyph, word, state_class = _state_presentation(state)
+        self.remove_class(
+            "state-idle",
+            "state-warning",
+            "state-working",
+            "state-attention",
+            "state-failed",
+            "state-finished",
+        )
+        self.add_class(state_class)
+        self.update(f"{glyph} {word}")
+
+
+class AgentStateCard(Vertical):
+    can_focus = True
+
+    DEFAULT_CSS = """
+    AgentStateCard {
+        width: 1fr;
+        height: 5;
+        padding: 0 1;
+        background: $surface 45%;
+    }
+
+    AgentStateCard .agent-card-heading {
+        width: 1fr;
+        height: 1;
+        text-style: bold;
+    }
+
+    AgentStateCard .agent-card-task {
+        width: 1fr;
+        height: 1;
+        color: $text-muted;
+
+        &:ansi {
+            text-style: dim;
+        }
+    }
+
+    AgentStateCard:focus {
+        background: $primary 12%;
+    }
+    """
+
+    class InspectRequested(Message):
+        def __init__(self, activity: AgentActivity) -> None:
+            super().__init__()
+            self.activity = activity
+
+    def __init__(self, activity: AgentActivity, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.activity = activity
+
+    def compose(self) -> ComposeResult:
+        yield AnimatedStateBorder(self.activity.state)
+        yield Static(self._heading_text(), classes="agent-card-heading")
+        yield AgentStateRow(self.activity.state)
+        yield Static(self._task_text(), classes="agent-card-task")
+
+    def update_activity(self, activity: AgentActivity) -> None:
+        self.activity = activity
+        if not self.is_mounted:
+            return
+        self.query_one(AnimatedStateBorder).update_state(activity.state)
+        self.query_one(AgentStateRow).update_state(activity.state)
+        self.query_one(".agent-card-heading", Static).update(
+            self._heading_text()
+        )
+        self.query_one(".agent-card-task", Static).update(self._task_text())
+
+    def _task_text(self) -> str:
+        return self.activity.current_activity or self.activity.task
+
+    def _heading_text(self) -> str:
+        if self.activity.owner_display_name:
+            return (
+                f"{self.activity.owner_display_name} · "
+                f"{self.activity.agent_display_name}"
+            )
+        return self.activity.agent_display_name
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key != "enter":
+            return
+        event.stop()
+        self.post_message(self.InspectRequested(self.activity))
+
+    def on_click(self, event: events.Click) -> None:
+        event.stop()
+        self.focus()
+        self.post_message(self.InspectRequested(self.activity))
+
+
+class HomePage(ResponsiveWorkspacePage):
+    DEFAULT_CSS = """
+    HomePage {
+        layout: grid;
+        grid-size: 1;
+        grid-columns: 1fr;
+        grid-rows: 2 6 1fr;
+    }
+
+    HomePage .home-summary-row {
+        width: 1fr;
+        height: 6;
+        layout: horizontal;
+        margin-bottom: 1;
+    }
+
+    HomePage .home-summary {
+        width: 1fr;
+        height: 5;
+        padding: 0 1;
+        border-left: solid $foreground-muted;
+    }
+
+    HomePage .home-summary .workspace-section-title {
+        margin-bottom: 0;
+    }
+
+    HomePage.narrow .home-summary {
+        padding: 0 0 0 1;
+    }
+
+    HomePage #home-activity {
+        width: 1fr;
+        height: 1fr;
+        min-height: 0;
+    }
+
+    HomePage #home-activity-list {
+        width: 1fr;
+        height: 1fr;
+        overflow-y: auto;
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
+    }
+
+    HomePage #home-action-needed {
+        width: 1fr;
+        height: 1fr;
+        min-height: 0;
+        padding: 0;
+        color: $foreground;
+        background: transparent;
+        border: none;
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
+    }
+
+    HomePage #home-action-needed.action-clear {
+        color: $foreground;
+    }
+
+    HomePage #home-action-needed > .option-list--option-highlighted {
+        color: $foreground;
+        background: $error 18%;
+        text-style: bold;
+    }
+
+    HomePage #home-action-needed.action-clear
+        > .option-list--option-highlighted {
+        background: $success 18%;
+    }
+
+    HomePage #home-system {
+        color: $foreground;
+    }
+    """
+
+    class AttentionSelected(Message):
+        def __init__(self, activity: AgentActivity) -> None:
+            super().__init__()
+            self.activity = activity
+
+    def __init__(self, view: HomeViewModel, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._view = view
+
+    def compose(self) -> ComposeResult:
+        yield Static("Home", classes="workspace-title")
+        with Horizontal(classes="home-summary-row"):
+            with Vertical(classes="home-summary"):
+                yield Static("OVERVIEW", classes="workspace-section-title")
+                yield Static(self._overview_text(), id="home-overview")
+            with Vertical(classes="home-summary"):
+                yield Static("ACTION NEEDED", classes="workspace-section-title")
+                yield NavigableOptionList(
+                    *self._action_options(),
+                    id="home-action-needed",
+                    classes=self._action_state_class(),
+                )
+            with Vertical(classes="home-summary"):
+                yield Static(
+                    "SYNC" if self._view.sync_summary else "SYSTEM",
+                    id="home-system-title",
+                    classes="workspace-section-title",
+                )
+                yield Static(self._system_text(), id="home-system")
+        with Vertical(id="home-activity"):
+            yield Static("RECENT ACTIVITY", classes="workspace-section-title")
+            yield Static(self._activity_text(), id="home-activity-list")
+
+    def update_view(self, view: HomeViewModel) -> None:
+        self._view = view
+        if not self.is_mounted:
+            return
+        self.query_one("#home-overview", Static).update(self._overview_text())
+        action = self.query_one("#home-action-needed", NavigableOptionList)
+        highlighted = action.highlighted or 0
+        action.clear_options()
+        action.add_options(self._action_options())
+        action.highlighted = min(highlighted, action.option_count - 1)
+        action.remove_class("action-attention", "action-clear")
+        action.add_class(self._action_state_class())
+        self.query_one("#home-system", Static).update(self._system_text())
+        self.query_one("#home-system-title", Static).update(
+            "SYNC" if view.sync_summary else "SYSTEM"
+        )
+        self.query_one("#home-activity-list", Static).update(self._activity_text())
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if event.option_list.id != "home-action-needed" or event.option.id is None:
+            return
+        event.stop()
+        activity = next(
+            (
+                item
+                for item in self._view.snapshot.activities
+                if event.option.id
+                == f"action-{item.tool_call_id.encode().hex()}"
+            ),
+            None,
+        )
+        if activity is not None:
+            self.post_message(self.AttentionSelected(activity))
+
+    def _overview_text(self) -> Text:
+        activities = self._view.snapshot.activities
+        active = sum(item.state in _ACTIVE_STATES for item in activities)
+        attention = sum(item.state is AgentRunState.ATTENTION for item in activities)
+        failures = sum(item.state is AgentRunState.FAILED for item in activities)
+        text = Text()
+        text.append(_activity_count_label(len(activities)), style="bold")
+        text.append(f"\n● {active} active", style="bold" if active else "dim")
+        text.append(f"\n! {attention} attention", style="bold" if attention else "dim")
+        text.append(f"\n× {failures} recent fail", style="bold" if failures else "dim")
+        return text
+
+    def _action_options(self) -> tuple[Option, ...]:
+        needs_action = [
+            item
+            for item in self._view.snapshot.activities
+            if item.state is AgentRunState.ATTENTION
+        ]
+        if not needs_action:
+            return (Option(Text("✓ Clear", style="bold"), id="action-clear"),)
+        options: list[Option] = []
+        for index, activity in enumerate(needs_action, start=1):
+            text = Text(no_wrap=True, overflow="ellipsis")
+            text.append(f"! {index} Attention ", style="bold")
+            if activity.owner_display_name:
+                text.append(f"{activity.owner_display_name} · ", style="bold")
+            text.append(activity.agent_display_name, style="bold")
+            text.append(f": {activity.current_activity or activity.task}", style="dim")
+            options.append(
+                Option(text, id=f"action-{activity.tool_call_id.encode().hex()}")
+            )
+        return tuple(options)
+
+    def _action_state_class(self) -> str:
+        if any(
+            item.state is AgentRunState.ATTENTION
+            for item in self._view.snapshot.activities
+        ):
+            return "action-attention"
+        return "action-clear"
+
+    def _system_text(self) -> Text:
+        if summary := self._view.sync_summary:
+            match summary[0]:
+                case "✓":
+                    style = "bold"
+                case "!" | "×":
+                    style = "bold"
+                case _:
+                    style = "dim"
+            return Text(summary, style=style)
+        summary = self._view.system_summary
+        suffix = summary.removeprefix("System ready").lstrip(" ·")
+        text = Text("✓ Ready", style="bold")
+        if suffix:
+            text.append(f"\n{suffix}", style="dim")
+        return text
+
+    def _activity_text(self) -> Text:
+        activities = self._view.snapshot.activities
+        if not activities:
+            return Text("○ No recent agent runs", style="dim")
+        text = Text()
+        for index, activity in enumerate(reversed(activities[-8:])):
+            if index:
+                text.append("\n")
+            text.append_text(_activity_line(activity))
+        return text
+
+
+class ChatPage(ResponsiveWorkspacePage):
+    def __init__(self, content: Widget | None = None, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._content = content
+
+    def compose(self) -> ComposeResult:
+        if self._content is None:
+            yield Static("Chat", classes="workspace-title")
+            yield Static("Conversation", classes="workspace-muted")
+            return
+        yield self._content
+
+
+class OfficePage(ResponsiveWorkspacePage):
+    DEFAULT_CSS = """
+    OfficePage {
+        layout: grid;
+        grid-size: 1;
+        grid-columns: 1fr;
+        grid-rows: 2 2 1fr auto;
+    }
+
+    OfficePage #office-agent-grid {
+        width: 1fr;
+        height: 1fr;
+        layout: grid;
+        grid-size: 3;
+        grid-columns: 1fr 1fr 1fr;
+        grid-gutter: 1 2;
+        overflow-y: auto;
+    }
+
+    OfficePage #office-empty {
+        width: 1fr;
+        height: 2;
+        padding: 0 1;
+        color: $text-muted;
+
+        &:ansi {
+            text-style: dim;
+        }
+    }
+
+    OfficePage.medium #office-agent-grid {
+        grid-size: 2;
+        grid-columns: 1fr 1fr;
+    }
+
+    OfficePage.narrow #office-agent-grid {
+        grid-size: 1;
+        grid-columns: 1fr;
+        grid-gutter: 0;
+    }
+
+    OfficePage #office-summary {
+        height: 2;
+        color: $text-muted;
+
+        &:ansi {
+            text-style: dim;
+        }
+    }
+
+    OfficePage #office-detail {
+        width: 1fr;
+        height: 10;
+        max-height: 35%;
+        padding: 1 0 0 0;
+        border-top: solid $foreground-muted;
+        overflow-y: auto;
+    }
+
+    OfficePage #office-detail-content {
+        width: 1fr;
+        height: auto;
+    }
+
+    OfficePage.narrow #office-detail {
+        height: 8;
+        max-height: 40%;
+    }
+    """
+
+    def __init__(self, view: OfficeViewModel, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._view = view
+        self._inspected_id: str | None = None
+
+    def compose(self) -> ComposeResult:
+        yield Static("Office", classes="workspace-title")
+        yield Static(self._summary_text(), id="office-summary")
+        with Container(id="office-agent-grid"):
+            yield from self._cards()
+            if not self._view.snapshot.activities:
+                yield Static("○ No agent runs in this session", id="office-empty")
+        detail = VerticalScroll(
+            Static(id="office-detail-content"), id="office-detail"
+        )
+        detail.display = False
+        yield detail
+
+    def update_view(self, view: OfficeViewModel) -> None:
+        self._view = view
+        if not self.is_mounted:
+            return
+        self.query_one("#office-summary", Static).update(self._summary_text())
+        self._refresh_cards()
+        self._refresh_detail()
+
+    def on_agent_state_card_inspect_requested(
+        self, message: AgentStateCard.InspectRequested
+    ) -> None:
+        message.stop()
+        self.inspect(message.activity)
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key != "escape" or self._inspected_id is None:
+            return
+        event.stop()
+        self._inspected_id = None
+        self._refresh_detail()
+
+    def inspect(self, activity: AgentActivity) -> None:
+        self._inspected_id = activity.tool_call_id
+        self._refresh_detail()
+
+    def _cards(self) -> tuple[AgentStateCard, ...]:
+        return tuple(
+            AgentStateCard(activity, id=_activity_widget_id(activity.tool_call_id))
+            for activity in self._view.snapshot.activities
+        )
+
+    def _refresh_cards(self) -> None:
+        grid = self.query_one("#office-agent-grid", Container)
+        existing = {
+            card.activity.tool_call_id: card for card in grid.query(AgentStateCard)
+        }
+        desired_ids = {
+            activity.tool_call_id for activity in self._view.snapshot.activities
+        }
+        for empty in grid.query("#office-empty"):
+            if desired_ids:
+                empty.remove()
+        for tool_call_id, card in existing.items():
+            if tool_call_id not in desired_ids:
+                card.remove()
+        for activity in self._view.snapshot.activities:
+            if card := existing.get(activity.tool_call_id):
+                card.update_activity(activity)
+            else:
+                grid.mount(
+                    AgentStateCard(
+                        activity, id=_activity_widget_id(activity.tool_call_id)
+                    )
+                )
+        if not desired_ids and not grid.query("#office-empty"):
+            grid.mount(Static("○ No agent runs in this session", id="office-empty"))
+
+    def _refresh_detail(self) -> None:
+        if not self.is_mounted:
+            return
+        detail = self.query_one("#office-detail", VerticalScroll)
+        activity = next(
+            (
+                item
+                for item in self._view.snapshot.activities
+                if item.tool_call_id == self._inspected_id
+            ),
+            None,
+        )
+        if activity is None:
+            self._inspected_id = None
+            detail.display = False
+            return
+        detail.display = True
+        self.query_one("#office-detail-content", Static).update(
+            self._detail_text(activity)
+        )
+
+    @staticmethod
+    def _detail_text(activity: AgentActivity) -> Text:
+        text = Text()
+        text.append(activity.agent_display_name, style="bold")
+        text.append(f"\n{activity.agent_name}", style="dim")
+        if activity.managed_agent_id is not None:
+            text.append(f"\nWorker  {activity.managed_agent_id}")
+            text.append(f"\nQueued  {activity.queued_messages}")
+        text.append(f"\nState   {_state_presentation(activity.state)[1]}")
+        if activity.error:
+            text.append(f"\n\nError\n{activity.error}", style="bold")
+        if activity.last_response:
+            text.append(f"\n\nOutput\n{activity.last_response}")
+        elif activity.is_managed:
+            text.append("\n\nNo output yet", style="dim")
+        return text
+
+    def _summary_text(self) -> str:
+        activities = self._view.snapshot.activities
+        active = sum(item.state in _ACTIVE_STATES for item in activities)
+        summary = f"{_activity_count_label(len(activities))}  ·  {active} active"
+        if self._view.scope_label:
+            return f"{self._view.scope_label}  ·  {summary}"
+        return summary
+
+
+class AgentsPage(ResponsiveWorkspacePage):
+    DEFAULT_CSS = """
+    AgentsPage {
+        layout: grid;
+        grid-size: 1;
+        grid-columns: 1fr;
+        grid-rows: 2 1fr;
+    }
+
+    AgentsPage .agents-body {
+        width: 1fr;
+        height: 1fr;
+        layout: horizontal;
+    }
+
+    AgentsPage #agents-list {
+        width: 34;
+        height: 1fr;
+        margin-right: 2;
+        background: transparent;
+        border: none;
+    }
+
+    AgentsPage #agent-detail {
+        width: 1fr;
+        height: 1fr;
+        padding: 0 1;
+        overflow-y: auto;
+    }
+
+    AgentsPage.narrow .agents-body {
+        layout: vertical;
+    }
+
+    AgentsPage.narrow #agents-list {
+        width: 1fr;
+        height: 7;
+        margin-right: 0;
+        margin-bottom: 1;
+    }
+
+    AgentsPage.narrow #agent-detail {
+        width: 1fr;
+        height: 1fr;
+        padding: 0;
+    }
+    """
+
+    class AgentSelected(Message):
+        def __init__(self, profile: AgentProfileViewModel) -> None:
+            super().__init__()
+            self.profile = profile
+
+    def __init__(self, view: AgentsViewModel, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._view = view
+        self._selected_name = view.profiles[0].name if view.profiles else None
+
+    def compose(self) -> ComposeResult:
+        yield Static("Agents", classes="workspace-title")
+        with Horizontal(classes="agents-body"):
+            yield NavigableOptionList(*self._options(), id="agents-list")
+            yield Static(self._detail_text(), id="agent-detail")
+
+    def update_view(self, view: AgentsViewModel) -> None:
+        self._view = view
+        names = {profile.name for profile in view.profiles}
+        if self._selected_name not in names:
+            self._selected_name = view.profiles[0].name if view.profiles else None
+        if not self.is_mounted:
+            return
+        options = self.query_one("#agents-list", NavigableOptionList)
+        options.clear_options()
+        options.add_options(self._options())
+        if self._selected_name is not None:
+            options.highlighted = self._profile_index(self._selected_name)
+        self.query_one("#agent-detail", Static).update(self._detail_text())
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if event.option_list.id != "agents-list" or event.option.id is None:
+            return
+        event.stop()
+        self._selected_name = event.option.id
+        self.query_one("#agent-detail", Static).update(self._detail_text())
+        if profile := self._selected_profile():
+            self.post_message(self.AgentSelected(profile))
+
+    def _options(self) -> tuple[Option, ...]:
+        options: list[Option] = []
+        for profile in self._view.profiles:
+            text = Text(no_wrap=True, overflow="ellipsis")
+            text.append(profile.display_name, style="bold")
+            text.append("  ·  ", style="dim")
+            text.append(
+                profile.agent_type,
+                style="bold" if profile.agent_type == "subagent" else "dim",
+            )
+            options.append(Option(text, id=profile.name))
+        return tuple(options)
+
+    def _selected_profile(self) -> AgentProfileViewModel | None:
+        return next(
+            (
+                profile
+                for profile in self._view.profiles
+                if profile.name == self._selected_name
+            ),
+            None,
+        )
+
+    def _profile_index(self, name: str) -> int:
+        return next(
+            index
+            for index, profile in enumerate(self._view.profiles)
+            if profile.name == name
+        )
+
+    def _detail_text(self) -> Text:
+        profile = self._selected_profile()
+        if profile is None:
+            return Text("No agents available", style="dim")
+        text = Text()
+        text.append(profile.display_name, style="bold")
+        text.append(f"\n{profile.name}", style="dim")
+        text.append(f"\n\n{profile.description or 'No description'}")
+        text.append("\n\nSafety  ", style="dim")
+        text.append(profile.safety)
+        text.append("\nType    ", style="dim")
+        text.append(
+            profile.agent_type,
+            style="bold" if profile.agent_type == "subagent" else None,
+        )
+        if profile.install_required:
+            text.append("\n\n! Installation required", style="bold")
+        return text
+
+
+class MCPPage(ResponsiveWorkspacePage):
+    DEFAULT_CSS = """
+    MCPPage {
+        padding: 0;
+    }
+
+    MCPPage #mcp-app {
+        width: 1fr;
+        height: 1fr;
+        padding: 1 2;
+        border: none;
+    }
+
+    MCPPage.narrow #mcp-app {
+        padding: 1;
+    }
+
+    MCPPage #mcp-content {
+        width: 1fr;
+        height: 1fr;
+    }
+
+    MCPPage #mcp-options {
+        width: 1fr;
+        height: 1fr;
+        max-height: 100%;
+    }
+
+    MCPPage #mcp-help {
+        width: 1fr;
+        height: 1;
+        color: $text-muted;
+
+        &:ansi {
+            text-style: dim;
+        }
+    }
+    """
+
+    def __init__(self, mcp_app: MCPApp, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._mcp_app = mcp_app
+
+    def compose(self) -> ComposeResult:
+        yield self._mcp_app
+
+    def show_index(self) -> None:
+        self._mcp_app.action_back()
+
+    def show_source(self, name: str) -> bool:
+        self.show_index()
+        options = self._mcp_app.query_one("#mcp-options", NavigableOptionList)
+        for prefix in ("server", "connector"):
+            try:
+                index = options.get_option_index(f"{prefix}:{name}")
+            except OptionDoesNotExist:
+                continue
+            options.highlighted = index
+            options.action_select()
+            return True
+        return False
+
+
+class UsagePage(ResponsiveWorkspacePage):
+    DEFAULT_CSS = """
+    UsagePage {
+        layout: grid;
+        grid-size: 1;
+        grid-columns: 1fr;
+        grid-rows: 2 2 1fr;
+    }
+
+    UsagePage .usage-grid {
+        width: 1fr;
+        height: auto;
+        layout: grid;
+        grid-size: 2;
+        grid-columns: 1fr 1fr;
+        grid-gutter: 1 2;
+    }
+
+    UsagePage.medium .usage-grid {
+        grid-gutter: 1 2;
+    }
+
+    UsagePage.narrow .usage-grid {
+        grid-size: 2;
+        grid-columns: 1fr 1fr;
+        grid-gutter: 1 2;
+    }
+
+    UsagePage .usage-value {
+        height: 3;
+        padding: 0 1;
+        border-left: solid $foreground-muted;
+    }
+    """
+
+    def __init__(self, view: UsageViewModel, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._view = view
+
+    def compose(self) -> ComposeResult:
+        yield Static("Usage", classes="workspace-title")
+        yield Static(
+            self._section_text(), id="usage-section", classes="workspace-section-title"
+        )
+        with Container(classes="usage-grid"):
+            yield Static(self._tokens_text(), id="usage-tokens", classes="usage-value")
+            yield Static(self._tools_text(), id="usage-tools", classes="usage-value")
+            yield Static(self._pace_text(), id="usage-pace", classes="usage-value")
+            yield Static(self._cost_text(), id="usage-cost", classes="usage-value")
+
+    def update_view(self, view: UsageViewModel) -> None:
+        self._view = view
+        if not self.is_mounted:
+            return
+        self.query_one("#usage-section", Static).update(self._section_text())
+        self.query_one("#usage-tokens", Static).update(self._tokens_text())
+        self.query_one("#usage-tools", Static).update(self._tools_text())
+        self.query_one("#usage-pace", Static).update(self._pace_text())
+        self.query_one("#usage-cost", Static).update(self._cost_text())
+
+    def _section_text(self) -> Text:
+        text = Text("CURRENT SESSION", style="bold")
+        if not any((
+            self._view.prompt_tokens,
+            self._view.completion_tokens,
+            self._view.context_tokens,
+            self._view.tool_calls_succeeded,
+            self._view.tool_calls_failed,
+            self._view.tool_calls_rejected,
+            self._view.steps,
+        )):
+            text.append("  ·  No model usage yet", style="dim")
+        return text
+
+    def _tokens_text(self) -> Text:
+        total = self._view.prompt_tokens + self._view.completion_tokens
+        text = Text("TOKENS", style="bold")
+        text.append(
+            f"\n{_compact_count(total)} total  ·  "
+            f"{_compact_count(self._view.context_tokens)} ctx",
+            style="bold",
+        )
+        text.append(
+            f"\n{_compact_count(self._view.prompt_tokens)} in  ·  "
+            f"{_compact_count(self._view.completion_tokens)} out",
+            style="dim",
+        )
+        return text
+
+    def _tools_text(self) -> Text:
+        total = (
+            self._view.tool_calls_succeeded
+            + self._view.tool_calls_failed
+            + self._view.tool_calls_rejected
+        )
+        text = Text("TOOLS", style="bold")
+        text.append(
+            f"\n{_compact_count(total)} calls  ·  "
+            f"{_compact_count(self._view.tool_calls_succeeded)} ok",
+            style="bold",
+        )
+        text.append(
+            f"\n{_compact_count(self._view.tool_calls_failed)} failed", style="dim"
+        )
+        text.append("  ·  ", style="dim")
+        text.append(
+            f"{_compact_count(self._view.tool_calls_rejected)} rejected", style="dim"
+        )
+        return text
+
+    def _pace_text(self) -> Text:
+        text = Text("PACE", style="bold")
+        text.append(
+            f"\n{_compact_count(self._view.steps)} steps  ·  "
+            f"{self._view.last_turn_duration:.1f}s last",
+            style="bold",
+        )
+        text.append(f"\n{self._view.tokens_per_second:.1f} tok/s", style="dim")
+        return text
+
+    def _cost_text(self) -> Text:
+        text = Text("EST. COST", style="bold")
+        text.append(f"\n${self._view.session_cost:.4f}", style="bold")
+        return text
+
+
+__all__ = [
+    "AgentProfileViewModel",
+    "AgentStateCard",
+    "AgentStateRow",
+    "AgentsPage",
+    "AgentsViewModel",
+    "AnimatedStateBorder",
+    "ChatPage",
+    "HomePage",
+    "HomeViewModel",
+    "MCPPage",
+    "OfficePage",
+    "OfficeViewModel",
+    "ResponsiveWorkspacePage",
+    "UsagePage",
+    "UsageViewModel",
+]

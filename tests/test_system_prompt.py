@@ -6,7 +6,7 @@ import sys
 import pytest
 
 from tests.conftest import build_test_vibe_config
-from vibe.core.agents import AgentManager
+from vibe.core.agents import ORCHESTRATOR, AgentManager
 from vibe.core.config.orchestrator_legacy import LegacyConfigOrchestrator
 from vibe.core.scratchpad import init_scratchpad
 from vibe.core.skills.manager import SkillManager
@@ -204,6 +204,57 @@ def test_headless_section_absent_by_default() -> None:
     )
 
     assert "Headless Mode" not in prompt
+
+
+def test_orchestrator_prompt_does_not_claim_unavailable_controls() -> None:
+    config = ORCHESTRATOR.apply_to_config(build_test_vibe_config())
+    tool_manager = ToolManager(lambda: config)
+    skill_manager = SkillManager(lambda: config)
+    agent_manager = AgentManager(
+        LegacyConfigOrchestrator(config), initial_agent="orchestrator"
+    )
+
+    prompt = get_universal_system_prompt(
+        tool_manager, config, skill_manager, agent_manager
+    )
+
+    assert "# Orchestrator Mode" in prompt
+    assert "No orchestrator control adapter is active" in prompt
+    assert "Use `control_cli`" not in prompt
+    assert "Use `manage_agents`" not in prompt
+
+
+def test_orchestrator_prompt_lists_only_enabled_controls() -> None:
+    base = build_test_vibe_config().model_copy(update={"enable_cli_control": True})
+    config = ORCHESTRATOR.apply_to_config(base)
+    tool_manager = ToolManager(lambda: config)
+    skill_manager = SkillManager(lambda: config)
+    agent_manager = AgentManager(
+        LegacyConfigOrchestrator(config), initial_agent="orchestrator"
+    )
+
+    prompt = get_universal_system_prompt(
+        tool_manager, config, skill_manager, agent_manager
+    )
+
+    assert "Use `control_cli`" in prompt
+    assert "Use `manage_agents`" not in prompt
+
+
+def test_orchestrator_prompt_is_excluded_from_headless_surface() -> None:
+    config = ORCHESTRATOR.apply_to_config(build_test_vibe_config())
+    tool_manager = ToolManager(lambda: config)
+    skill_manager = SkillManager(lambda: config)
+    agent_manager = AgentManager(
+        LegacyConfigOrchestrator(config), initial_agent="orchestrator"
+    )
+
+    prompt = get_universal_system_prompt(
+        tool_manager, config, skill_manager, agent_manager, headless=True
+    )
+
+    assert "# Headless Mode" in prompt
+    assert "# Orchestrator Mode" not in prompt
 
 
 def test_current_date_placeholder_substituted_in_prompt() -> None:

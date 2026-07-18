@@ -182,6 +182,47 @@ class TestMCPAppInit:
         app.action_back()
         assert render_calls == []
 
+    def test_update_sources_replaces_servers_and_registries(self) -> None:
+        old_connector_registry = FakeConnectorRegistry(connectors={"old": []})
+        new_connector_registry = FakeConnectorRegistry(connectors={"new": []})
+        old_mcp_registry = FakeMCPRegistry()
+        new_mcp_registry = FakeMCPRegistry()
+        app = MCPApp(
+            mcp_servers=[MCPStdio(name="old", transport="stdio", command="cmd")],
+            tool_manager=_make_tool_manager({}),
+            connector_registry=old_connector_registry,
+            mcp_registry=old_mcp_registry,
+        )
+        app._rebuild_preserving_scroll = MagicMock()
+        new_servers = [MCPStdio(name="new", transport="stdio", command="cmd")]
+
+        app.update_sources(
+            new_servers,
+            connector_registry=new_connector_registry,
+            mcp_registry=new_mcp_registry,
+        )
+
+        assert app._mcp_servers == tuple(new_servers)
+        assert app._connector_registry is new_connector_registry
+        assert app._mcp_registry is new_mcp_registry
+        assert app._connector_names == ["new"]
+        app._rebuild_preserving_scroll.assert_called_once_with()
+
+    def test_update_sources_none_clears_registries(self) -> None:
+        app = MCPApp(
+            mcp_servers=[],
+            tool_manager=_make_tool_manager({}),
+            connector_registry=FakeConnectorRegistry(connectors={"old": []}),
+            mcp_registry=FakeMCPRegistry(),
+        )
+        app._rebuild_preserving_scroll = MagicMock()
+
+        app.update_sources([], connector_registry=None, mcp_registry=None)
+
+        assert app._connector_registry is None
+        assert app._mcp_registry is None
+        assert app._connector_names == []
+
     def test_start_refresh_dispatches_worker(self) -> None:
         servers = [MCPStdio(name="srv", transport="stdio", command="cmd")]
         mgr = _make_tool_manager({})
@@ -190,6 +231,7 @@ class TestMCPAppInit:
             mcp_servers=servers, tool_manager=mgr, refresh_callback=refresh_callback
         )
         app.run_worker = MagicMock()
+        app._refresh_active = True
 
         app._start_refresh()
 
@@ -228,6 +270,7 @@ class TestMCPAppInit:
         mgr = _make_tool_manager({})
         app = MCPApp(mcp_servers=servers, tool_manager=mgr)
         app._refreshing = True
+        app._refresh_active = True
         app.refresh_index = MagicMock()
 
         worker = MagicMock(spec=Worker)
@@ -235,6 +278,7 @@ class TestMCPAppInit:
         worker.is_finished = True
         event = MagicMock(spec=Worker.StateChanged)
         event.worker = worker
+        app._refresh_worker = worker
 
         with patch.object(
             MCPApp, "is_attached", new_callable=PropertyMock, return_value=True
@@ -258,6 +302,7 @@ class TestMCPAppInit:
         worker.is_finished = True
         event = MagicMock(spec=Worker.StateChanged)
         event.worker = worker
+        app._refresh_worker = worker
 
         with patch.object(
             MCPApp, "is_attached", new_callable=PropertyMock, return_value=False

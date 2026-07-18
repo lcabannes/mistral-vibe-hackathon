@@ -1,0 +1,5 @@
+schema_version = 1
+team_repo_url = "origin"
+branch = "vibe-team-demo"
+history_limit = 50
+history_scope = "messages"

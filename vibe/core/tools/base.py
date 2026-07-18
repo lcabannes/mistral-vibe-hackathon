@@ -29,8 +29,10 @@ from vibe.core.types import ToolStreamEvent
 from vibe.core.utils.io import read_safe
 
 if TYPE_CHECKING:
+    from vibe.core.agents.management_port import AgentManagementPort
     from vibe.core.agents.manager import AgentManager
     from vibe.core.config import AnyVibeConfig
+    from vibe.core.control_port import CLIControlPort
     from vibe.core.hooks.models import HookConfigResult
     from vibe.core.skills.manager import SkillManager
     from vibe.core.telemetry.types import LaunchContext
@@ -68,6 +70,8 @@ class InvokeContext:
     hook_config_result: HookConfigResult | None = field(default=None)
     session_id: str | None = field(default=None)
     mcp_pool: MCPConnectionPool | None = field(default=None)
+    agent_management: AgentManagementPort | None = field(default=None)
+    cli_control: CLIControlPort | None = field(default=None)
 
 
 class ToolError(Exception):

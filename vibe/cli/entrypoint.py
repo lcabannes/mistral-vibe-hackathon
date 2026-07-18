@@ -18,6 +18,9 @@ if TYPE_CHECKING:
 
 
 def parse_arguments() -> argparse.Namespace:
+    if len(sys.argv) > 1 and sys.argv[1] == "team":
+        return _parse_team_arguments(sys.argv[2:])
+
     parser = argparse.ArgumentParser(
         description="Run the Mistral Vibe interactive CLI",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -168,6 +171,56 @@ def parse_arguments() -> argparse.Namespace:
         help="Resume a session. Without SESSION_ID, shows an interactive picker.",
     )
     return parser.parse_args()
+
+
+def _parse_team_arguments(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog=f"{Path(sys.argv[0]).name} team",
+        description="Join and configure a repository-scoped Vibe team workspace",
+    )
+    subparsers = parser.add_subparsers(dest="team_action", required=True)
+    join = subparsers.add_parser(
+        "join", help="Connect this Git project to a shared team workspace"
+    )
+    join.add_argument("team_repo_url", metavar="TEAM_REPO_URL")
+    join.add_argument("--branch", default="vibe-team-demo")
+    join.add_argument(
+        "--history",
+        choices=["status", "markers", "messages"],
+        default="markers",
+        dest="history_scope",
+        help="Conversation data shared with teammates (default: markers)",
+    )
+    join.add_argument(
+        "--history-limit",
+        type=int,
+        choices=range(1, 201),
+        default=50,
+        metavar="N",
+    )
+    join.add_argument(
+        "--activity",
+        choices=["status", "summaries"],
+        default="status",
+        dest="privacy_mode",
+        help="Agent activity detail shared with teammates (default: status)",
+    )
+    join.add_argument("--member-name", default="")
+    join.add_argument("--workdir", type=Path, metavar="DIR")
+    join.add_argument(
+        "--trust",
+        action="store_true",
+        help="Trust the working directory for this invocation only",
+    )
+    parser.set_defaults(
+        command="team",
+        worktree=None,
+        setup=False,
+        check_upgrade=False,
+        add_dir=[],
+        prompt=None,
+    )
+    return parser.parse_args(argv)
 
 
 def check_and_resolve_trusted_folder(cwd: Path) -> None:
@@ -348,6 +401,13 @@ def main() -> None:
         trusted_folders_manager.trust_for_session(resolved)
 
     init_harness_files_manager("user", "project", additional_dirs=additional_dirs)
+
+    if getattr(args, "command", None) == "team":
+        if not args.trust:
+            check_and_resolve_trusted_folder(cwd)
+        from vibe.cli.team import run_team_command
+
+        raise SystemExit(run_team_command(args, cwd))
 
     resolve_trusted_folder: Callable[[], None] | None = None
     if args.prompt is None and not args.check_upgrade:

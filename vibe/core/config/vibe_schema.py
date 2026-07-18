@@ -46,6 +46,7 @@ from vibe.core.config.models import (
     ProjectContextConfig,
     ProviderConfig,
     SessionLoggingConfig,
+    TeamWorkspaceConfig,
     TranscribeModelConfig,
     TranscribeProviderConfig,
     TTSModelConfig,
@@ -296,6 +297,13 @@ class VibeConfigSchema(ConfigSchema):
         ),
     )
     enable_config_orchestrator: Annotated[bool, WithReplaceMerge()] = False
+    enable_orchestrator_controls: Annotated[bool, WithReplaceMerge()] = False
+    enable_cli_control: Annotated[bool, WithReplaceMerge()] = False
+    enable_agent_management: Annotated[bool, WithReplaceMerge()] = False
+
+    team_workspace: Annotated[TeamWorkspaceConfig, WithDeepMerge()] = Field(
+        default_factory=TeamWorkspaceConfig
+    )
 
     # Top-level scalars
     theme: Annotated[str, WithReplaceMerge(), BeforeValidator(resolve_theme_name)] = (

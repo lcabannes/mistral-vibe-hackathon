@@ -149,6 +149,11 @@ class CommandRegistry:
                 description="Configure voice settings",
                 handler="_show_voice_settings",
             ),
+            "orchestrate": Command(
+                aliases=frozenset(["/orchestrate", "/orchestrator"]),
+                description="Switch to the orchestrator agent",
+                handler="_show_orchestrator",
+            ),
             "leanstall": Command(
                 aliases=frozenset(["/leanstall"]),
                 description="Install the Lean 4 agent (leanstral)",
