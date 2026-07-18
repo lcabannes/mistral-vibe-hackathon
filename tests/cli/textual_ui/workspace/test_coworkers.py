@@ -145,7 +145,9 @@ async def test_live_update_preserves_member_and_run_selection() -> None:
 
 
 @pytest.mark.asyncio
-async def test_narrow_coworkers_stacks_local_scroll_regions_without_page_overflow() -> None:
+async def test_narrow_coworkers_stacks_local_scroll_regions_without_page_overflow() -> (
+    None
+):
     app = _CoworkersApp()
 
     async with app.run_test(size=(70, 24)) as pilot:
@@ -164,9 +166,7 @@ async def test_narrow_coworkers_stacks_local_scroll_regions_without_page_overflo
 
 @pytest.mark.asyncio
 async def test_unconfigured_state_shows_one_join_command_without_fake_members() -> None:
-    app = _CoworkersApp(
-        CoworkersViewModel(join_hint="vibe team join <team-repo-url>")
-    )
+    app = _CoworkersApp(CoworkersViewModel(join_hint="vibe team join <team-repo-url>"))
 
     async with app.run_test(size=(70, 24)):
         roster = app.page.query_one("#coworkers-list", NavigableOptionList)
@@ -175,4 +175,3 @@ async def test_unconfigured_state_shows_one_join_command_without_fake_members() 
             roster.get_option_at_index(0).prompt
         )
         assert app.page.selected_member_id is None
-

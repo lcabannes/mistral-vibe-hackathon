@@ -96,15 +96,10 @@ def test_team_snapshot_maps_owner_branch_history_and_deterministic_ages() -> Non
 
 def test_disabled_snapshot_exposes_only_single_join_hint() -> None:
     snapshot = _snapshot().model_copy(
-        update={
-            "connection_state": ConnectionState.DISABLED,
-            "members": (),
-            "runs": (),
-        }
+        update={"connection_state": ConnectionState.DISABLED, "members": (), "runs": ()}
     )
 
     view = coworkers_view(snapshot)
 
     assert view.join_hint == "vibe team join <team-repo-url>"
     assert view.members == ()
-

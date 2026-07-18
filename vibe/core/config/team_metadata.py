@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import re
 import tempfile
 import tomllib
 from typing import Literal
+from urllib.parse import urlparse
 
 from git import InvalidGitRepositoryError, Repo
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -29,9 +31,7 @@ class TeamProjectMetadata(BaseModel):
     branch: str = Field(default="vibe-team-demo", min_length=1)
     history_limit: int = Field(default=50, ge=1, le=200)
     history_scope: Literal["status", "markers", "messages"] = "markers"
-    workspace_id: str | None = Field(
-        default=None, pattern=r"^ws_[a-f0-9]{32}$"
-    )
+    workspace_id: str | None = Field(default=None, pattern=r"^ws_[a-f0-9]{32}$")
 
     @field_validator("team_repo_url", "branch")
     @classmethod
@@ -41,15 +41,27 @@ class TeamProjectMetadata(BaseModel):
             raise ValueError("value must not be blank")
         return stripped
 
+    @field_validator("team_repo_url")
+    @classmethod
+    def reject_http_credentials(cls, value: str) -> str:
+        parsed = urlparse(value)
+        if parsed.scheme in {"http", "https"} and parsed.username is not None:
+            raise ValueError("team repository URL must not contain credentials")
+        return value
+
     @field_validator("branch")
     @classmethod
     def validate_branch(cls, value: str) -> str:
-        if (
-            value.startswith(("/", "."))
+        invalid_shape = (
+            not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", value)
+            or value.startswith(("/", ".", "-"))
             or value.endswith(("/", "."))
-            or ".." in value
-            or any(char in value for char in ("\\", "\x00", "\n", " "))
-        ):
+        )
+        invalid_fragment = any(item in value for item in ("..", "//", "@{"))
+        invalid_segment = any(
+            part.startswith(".") or part.endswith(".lock") for part in value.split("/")
+        )
+        if invalid_shape or invalid_fragment or invalid_segment:
             raise ValueError("invalid team branch")
         return value
 

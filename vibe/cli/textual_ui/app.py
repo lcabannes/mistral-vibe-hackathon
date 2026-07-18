@@ -154,6 +154,7 @@ from vibe.cli.textual_ui.windowing import (
 )
 from vibe.cli.textual_ui.word_selection import WordSelectScreen
 from vibe.cli.textual_ui.workspace import (
+    AgentActivity,
     AgentActivitySnapshot,
     AgentActivityStore,
     AgentRunState,
@@ -196,6 +197,12 @@ from vibe.cli.vscode_extension_promo import (
     VscodeExtensionPromo,
     VscodeExtensionPromoState,
     should_show_promo,
+)
+from vibe.core.agent_room import (
+    AgentRoomClient,
+    AgentRoomSnapshot,
+    AgentRoomUnavailable,
+    launch_agent_room_backend,
 )
 from vibe.core.agents import (
     AgentProfile,
@@ -291,6 +298,7 @@ from vibe.core.types import (
     ContextTooLongError,
     ImageAttachment,
     LLMMessage,
+    LLMUsage,
     RateLimitError,
     ReasoningEvent,
     RefusalError,
@@ -553,7 +561,7 @@ class VibeApp(App):  # noqa: PLR0904
         patch_driver_parser(driver_class)
         return driver_class
 
-    def __init__(
+    def __init__(  # noqa: PLR0915
         self,
         agent_loop: AgentLoop,
         startup: StartupOptions | None = None,
@@ -568,9 +576,9 @@ class VibeApp(App):  # noqa: PLR0904
         **kwargs: Any,
     ) -> None:
         team_workspace_service = cast(
-            TeamWorkspaceService | None,
-            kwargs.pop("team_workspace_service", None),
+            TeamWorkspaceService | None, kwargs.pop("team_workspace_service", None)
         )
+        supplied_agent_room = kwargs.pop("agent_room_client", None)
         super().__init__(**kwargs)
         self.agent_loop = agent_loop
         self._plan_info: PlanInfo | None = None
@@ -620,6 +628,7 @@ class VibeApp(App):  # noqa: PLR0904
             and should_show_promo(vscode_extension_promo.initial_state)
         )
         self._configure_team_workspace_integration(team_workspace_service)
+        self._configure_agent_room(supplied_agent_room)
         self._configure_startup_workspace(startup)
         self._last_escape_time: float | None = None
         self._quit_manager = QuitManager(self)
@@ -669,6 +678,27 @@ class VibeApp(App):  # noqa: PLR0904
         self._workspace_view = self._initial_workspace_view()
         self._activity_store = AgentActivityStore(self.agent_loop.session_id)
         self._set_primary_activity(AgentRunState.IDLE)
+
+    def _configure_agent_room(self, supplied: object) -> None:
+        self._agent_room_discovery_enabled = supplied is not False
+        self._agent_room_launch_attempted = False
+        self._agent_room_client = cast(
+            AgentRoomClient | None,
+            supplied
+            if isinstance(supplied, AgentRoomClient)
+            else (
+                AgentRoomClient.discovered(self.agent_loop.session_id)
+                or AgentRoomClient("http://127.0.0.1:4173", self.agent_loop.session_id)
+                if self._agent_room_discovery_enabled
+                else None
+            ),
+        )
+        self._agent_room_connected = False
+        self._agent_room_snapshot: AgentRoomSnapshot | None = None
+        self._agent_room_discovery_timer: Timer | None = None
+        if self._agent_room_client is not None:
+            self._agent_room_client.add_listener(self._on_agent_room_snapshot)
+            self.agent_loop.set_agent_management_port(self._agent_room_client)
 
     def _initial_workspace_view(self) -> WorkspaceView:
         if (
@@ -750,9 +780,10 @@ class VibeApp(App):  # noqa: PLR0904
     def _observe_public_event(self, event: BaseEvent) -> bool:
         session_changed = self._sync_activity_store_session()
         self._activity_store.apply(event)
-        if isinstance(
-            event, (SubagentLifecycleEvent, ToolCallEvent, ToolResultEvent)
-        ) and event.tool_name == "task":
+        if (
+            isinstance(event, (SubagentLifecycleEvent, ToolCallEvent, ToolResultEvent))
+            and event.tool_name == "task"
+        ):
             self._publish_local_task_activity(event.tool_call_id)
         if isinstance(event, WaitingForInputEvent):
             self._set_primary_activity(AgentRunState.ATTENTION, "Waiting for input")
@@ -814,9 +845,9 @@ class VibeApp(App):  # noqa: PLR0904
             service is not None or self.config.team_workspace.enabled
         )
         self._team_workspace_start_task: asyncio.Task[None] | None = None
-        self._team_workspace_publish_tasks: set[
-            asyncio.Task[TeamWorkspaceSnapshot]
-        ] = set()
+        self._team_workspace_publish_tasks: set[asyncio.Task[TeamWorkspaceSnapshot]] = (
+            set()
+        )
         if service is None:
             return
         service.add_listener(self._refresh_team_workspace_pages)
@@ -979,6 +1010,10 @@ class VibeApp(App):  # noqa: PLR0904
         return f"workspace-{view.value}"
 
     def _workspace_system_summary(self) -> str:
+        if self._agent_room_connected and self._agent_room_snapshot is not None:
+            activities = self._agent_room_snapshot.activities
+            live = sum(run.runtime_live for run in activities)
+            return f"Agent Room connected · {live} live"
         if self._fatal_init_error:
             return "System unavailable"
         if not self.agent_loop.is_initialized:
@@ -994,6 +1029,8 @@ class VibeApp(App):  # noqa: PLR0904
         return f"System ready · {source_count} MCP {noun}"
 
     def _workspace_activity_snapshot(self) -> AgentActivitySnapshot:
+        if self._agent_room_connected and self._agent_room_snapshot is not None:
+            return self._agent_room_activity_snapshot(self._agent_room_snapshot)
         service = self._team_workspace_service
         if service is not None and service.enabled:
             return team_activity_snapshot(service.snapshot)
@@ -1014,6 +1051,12 @@ class VibeApp(App):  # noqa: PLR0904
     def _office_view_model(
         self, snapshot: AgentActivitySnapshot | None = None
     ) -> OfficeViewModel:
+        if self._agent_room_connected and self._agent_room_snapshot is not None:
+            branch = self._agent_room_snapshot.workspace.get("integration_branch")
+            scope = f"Agent Room · {branch}" if branch else "Agent Room"
+            return OfficeViewModel(
+                snapshot or self._workspace_activity_snapshot(), scope
+            )
         service = self._team_workspace_service
         return OfficeViewModel(
             snapshot or self._workspace_activity_snapshot(),
@@ -1021,6 +1064,94 @@ class VibeApp(App):  # noqa: PLR0904
             if service is not None and service.enabled
             else None,
         )
+
+    def _agent_room_activity_snapshot(
+        self, snapshot: AgentRoomSnapshot
+    ) -> AgentActivitySnapshot:
+        activities = tuple(
+            AgentActivity(
+                tool_call_id=run.tool_call_id,
+                parent_session_id=run.parent_session_id or self.agent_loop.session_id,
+                child_session_id=run.child_session_id,
+                agent_name=run.agent_name,
+                agent_display_name=run.agent_display_name,
+                task=run.task,
+                state=self._agent_room_run_state(run.state),
+                started_at=run.started_at,
+                updated_at=run.updated_at,
+                current_activity=run.current_activity,
+                turns_used=run.turns_used,
+                usage=LLMUsage(
+                    prompt_tokens=int(run.usage.get("prompt_tokens", 0)),
+                    completion_tokens=int(run.usage.get("completion_tokens", 0)),
+                ),
+                is_primary=run.is_primary,
+                branch=run.branch,
+                managed_agent_id=run.tool_call_id,
+                event_sequence=snapshot.revision,
+                queued_messages=run.queued_messages,
+                last_response=run.last_response,
+                error=run.error,
+                conversation=run.conversation,
+                context_tokens=run.context_tokens,
+                context_limit=run.context_limit,
+                estimated_cost_usd=run.estimated_cost_usd,
+                model=run.model,
+                group_id=run.group_id,
+                runtime_live=run.runtime_live,
+                worktree_path=run.worktree_path,
+                approvals=run.approvals,
+                questions=run.questions,
+            )
+            for run in snapshot.activities
+        )
+        return AgentActivitySnapshot(
+            session_id=f"agent-room:{snapshot.instance_id}", activities=activities
+        )
+
+    @staticmethod
+    def _agent_room_run_state(state: str) -> AgentRunState:
+        try:
+            return AgentRunState(state)
+        except ValueError:
+            return AgentRunState.FAILED
+
+    def _on_agent_room_snapshot(self, snapshot: AgentRoomSnapshot) -> None:
+        self._agent_room_snapshot = snapshot
+        self._agent_room_connected = snapshot.connected
+        if self.screen_stack:
+            self._refresh_activity_pages(self._agent_room_activity_snapshot(snapshot))
+
+    async def _connect_agent_room(self) -> bool:
+        client = self._agent_room_client
+        if client is None:
+            return False
+        client.parent_session_id = self.agent_loop.session_id
+        try:
+            snapshot = await client.refresh()
+        except AgentRoomUnavailable as error:
+            logger.debug("Agent Room discovery endpoint unavailable: %s", error)
+            return False
+        self._on_agent_room_snapshot(snapshot)
+        self.agent_loop.set_agent_management_port(client)
+        return True
+
+    async def _discover_agent_room(self) -> None:
+        if not self._agent_room_discovery_enabled or self._agent_room_connected:
+            return
+        client = self._agent_room_client
+        if client is None:
+            client = AgentRoomClient.discovered(self.agent_loop.session_id)
+            if client is None:
+                return
+            self._agent_room_client = client
+            client.add_listener(self._on_agent_room_snapshot)
+        if not self._agent_room_launch_attempted:
+            self._agent_room_launch_attempted = True
+            workdir = Path(self.config.displayed_workdir or Path.cwd())
+            launch_agent_room_backend(workdir.expanduser().resolve())
+        if await self._connect_agent_room():
+            await self._restart_managed_agent_events()
 
     def _coworkers_view_model(self) -> CoworkersViewModel:
         service = self._team_workspace_service
@@ -1032,9 +1163,7 @@ class VibeApp(App):  # noqa: PLR0904
                 connection_state="connecting",
                 privacy_label=self.config.team_workspace.privacy_mode,
             )
-        return CoworkersViewModel(
-            join_hint="vibe team join <team-repo-url>",
-        )
+        return CoworkersViewModel(join_hint="vibe team join <team-repo-url>")
 
     async def _start_team_workspace(self) -> None:
         try:
@@ -1049,11 +1178,7 @@ class VibeApp(App):  # noqa: PLR0904
 
             await service.start()
             profile = self.agent_loop.agent_profile
-            state = (
-                AgentRunState.WORKING
-                if self._agent_running
-                else AgentRunState.IDLE
-            )
+            state = AgentRunState.WORKING if self._agent_running else AgentRunState.IDLE
             await service.publish_activity(
                 local_run_id=f"primary:{self.agent_loop.session_id}",
                 agent_name=profile.name,
@@ -1159,9 +1284,7 @@ class VibeApp(App):  # noqa: PLR0904
         if error := task.exception():
             logger.error("Failed to publish team activity", exc_info=error)
 
-    def _schedule_team_conversation(
-        self, role: ConversationRole, text: str
-    ) -> None:
+    def _schedule_team_conversation(self, role: ConversationRole, text: str) -> None:
         service = self._team_workspace_service
         if service is None or not service.enabled or not text:
             return
@@ -1213,8 +1336,7 @@ class VibeApp(App):  # noqa: PLR0904
         self._managed_agent_events_generation += 1
         generation = self._managed_agent_events_generation
         self._managed_agent_events_task = asyncio.create_task(
-            self._consume_managed_agent_events(generation),
-            name="managed-agent-events",
+            self._consume_managed_agent_events(generation), name="managed-agent-events"
         )
 
     async def _stop_managed_agent_events(self) -> None:
@@ -1227,9 +1349,7 @@ class VibeApp(App):  # noqa: PLR0904
         with suppress(asyncio.CancelledError):
             await task
 
-    def _on_managed_agent_lifecycle(
-        self, event: ManagedAgentLifecycleEvent
-    ) -> None:
+    def _on_managed_agent_lifecycle(self, event: ManagedAgentLifecycleEvent) -> None:
         match event.state:
             case ManagedAgentState.STARTING:
                 state = AgentRunState.REQUESTED
@@ -1275,20 +1395,19 @@ class VibeApp(App):  # noqa: PLR0904
             return
         workspace_snapshot = (
             self._workspace_activity_snapshot()
-            if self._team_workspace_service is not None
-            and self._team_workspace_service.enabled
+            if self._agent_room_connected
+            or (
+                self._team_workspace_service is not None
+                and self._team_workspace_service.enabled
+            )
             else snapshot
         )
-        self.query_one(HomePage).update_view(
-            self._home_view_model(workspace_snapshot)
-        )
+        self.query_one(HomePage).update_view(self._home_view_model(workspace_snapshot))
         self.query_one(OfficePage).update_view(
             self._office_view_model(workspace_snapshot)
         )
 
-    def _refresh_team_workspace_pages(
-        self, snapshot: TeamWorkspaceSnapshot
-    ) -> None:
+    def _refresh_team_workspace_pages(self, snapshot: TeamWorkspaceSnapshot) -> None:
         if not self.screen_stack:
             return
         activity_snapshot = team_activity_snapshot(snapshot)
@@ -1315,6 +1434,8 @@ class VibeApp(App):  # noqa: PLR0904
         )
 
     def _sync_activity_store_session(self) -> bool:
+        if self._agent_room_client is not None:
+            self._agent_room_client.parent_session_id = self.agent_loop.session_id
         if self._activity_store.snapshot.session_id == self.agent_loop.session_id:
             return False
         self._reset_activity_store()
@@ -1364,9 +1485,7 @@ class VibeApp(App):  # noqa: PLR0904
         elif view is WorkspaceView.AGENTS:
             self.query_one(AgentsPage).update_view(self._agents_view_model())
         elif view is WorkspaceView.COWORKERS:
-            self.query_one(CoworkersPage).update_view(
-                self._coworkers_view_model()
-            )
+            self.query_one(CoworkersPage).update_view(self._coworkers_view_model())
         elif view is WorkspaceView.USAGE:
             self.query_one(UsagePage).update_view(
                 UsageViewModel.from_stats(self.agent_loop.stats)
@@ -1424,6 +1543,93 @@ class VibeApp(App):  # noqa: PLR0904
         self._show_workspace(WorkspaceView.OFFICE)
         self.query_one(OfficePage).inspect(message.activity)
 
+    async def on_office_page_agent_message_submitted(
+        self, message: OfficePage.AgentMessageSubmitted
+    ) -> None:
+        client = self._agent_room_client
+        if client is None or not self._agent_room_connected:
+            self.notify("Agent Room is unavailable", severity="error")
+            return
+        try:
+            await client.message(message.agent_id, message.content)
+        except (AgentRoomUnavailable, ValueError) as error:
+            self.notify(str(error), severity="error")
+
+    async def on_office_page_agent_create_requested(
+        self, message: OfficePage.AgentCreateRequested
+    ) -> None:
+        client = self._agent_room_client
+        if client is None or not self._agent_room_connected:
+            self.notify("Agent Room is unavailable", severity="error")
+            return
+        try:
+            created = await client.start(BuiltinAgentName.DEFAULT.value, message.task)
+        except (AgentRoomUnavailable, ValueError) as error:
+            self.notify(str(error), severity="error")
+            return
+        activity = next(
+            (
+                item
+                for item in self._workspace_activity_snapshot().activities
+                if item.managed_agent_id == created.agent_id
+            ),
+            None,
+        )
+        if activity is not None:
+            self.query_one(OfficePage).inspect(activity)
+
+    async def on_office_page_agent_stop_requested(
+        self, message: OfficePage.AgentStopRequested
+    ) -> None:
+        client = self._agent_room_client
+        if client is None or not self._agent_room_connected:
+            self.notify("Agent Room is unavailable", severity="error")
+            return
+        try:
+            await client.stop(message.agent_id)
+        except (AgentRoomUnavailable, ValueError) as error:
+            self.notify(str(error), severity="error")
+
+    async def on_office_page_agent_cancel_requested(
+        self, message: OfficePage.AgentCancelRequested
+    ) -> None:
+        client = self._agent_room_client
+        if client is None or not self._agent_room_connected:
+            self.notify("Agent Room is unavailable", severity="error")
+            return
+        try:
+            await client.cancel(message.agent_id)
+        except (AgentRoomUnavailable, ValueError) as error:
+            self.notify(str(error), severity="error")
+
+    async def on_office_page_agent_approval_resolved(
+        self, message: OfficePage.AgentApprovalResolved
+    ) -> None:
+        client = self._agent_room_client
+        if client is None or not self._agent_room_connected:
+            self.notify("Agent Room is unavailable", severity="error")
+            return
+        try:
+            await client.resolve_approval(
+                message.agent_id, message.approval_id, message.decision
+            )
+        except (AgentRoomUnavailable, ValueError) as error:
+            self.notify(str(error), severity="error")
+
+    async def on_office_page_agent_question_answered(
+        self, message: OfficePage.AgentQuestionAnswered
+    ) -> None:
+        client = self._agent_room_client
+        if client is None or not self._agent_room_connected:
+            self.notify("Agent Room is unavailable", severity="error")
+            return
+        try:
+            await client.answer_question(
+                message.agent_id, message.question_id, message.answers
+            )
+        except (AgentRoomUnavailable, ValueError) as error:
+            self.notify(str(error), severity="error")
+
     @property
     def _messages_area(self) -> Widget:
         if self._cached_messages_area is None:
@@ -1457,8 +1663,7 @@ class VibeApp(App):  # noqa: PLR0904
         )
         self._activity_store.add_listener(self._refresh_activity_pages)
         if self._team_workspace_configured and (
-            self._team_workspace_service is None
-            or self._team_workspace_service.enabled
+            self._team_workspace_service is None or self._team_workspace_service.enabled
         ):
             self._team_workspace_start_task = asyncio.create_task(
                 self._start_team_workspace(), name="team-workspace-start"
@@ -1478,7 +1683,13 @@ class VibeApp(App):  # noqa: PLR0904
 
         self.agent_loop.set_approval_callback(self._approval_callback)
         self.agent_loop.set_user_input_callback(self._user_input_callback)
+        if not await self._connect_agent_room():
+            await self._discover_agent_room()
         await self._restart_managed_agent_events()
+        if self._agent_room_discovery_enabled:
+            self._agent_room_discovery_timer = self.set_interval(
+                2.0, self._discover_agent_room
+            )
         self._refresh_profile_widgets()
 
         self.call_after_refresh(self._focus_workspace_view)
@@ -2930,9 +3141,7 @@ class VibeApp(App):  # noqa: PLR0904
             await self._remove_loading_widget()
             self._refresh_banner()
 
-    async def _handle_agent_loop_events(
-        self, events: AsyncGenerator[BaseEvent]
-    ) -> str:
+    async def _handle_agent_loop_events(self, events: AsyncGenerator[BaseEvent]) -> str:
         assistant_content: list[str] = []
         assistant_length = 0
         async for event in events:
@@ -5048,8 +5257,16 @@ class VibeApp(App):  # noqa: PLR0904
         self.agent_loop.emit_session_closed_telemetry()
 
     async def _begin_shutdown(self) -> None:
+        if self._agent_room_discovery_timer is not None:
+            self._agent_room_discovery_timer.stop()
+            self._agent_room_discovery_timer = None
         await self._stop_managed_agent_events()
         self.agent_loop.set_cli_control_port(None)
+        self.agent_loop.set_agent_management_port(None)
+        if self._agent_room_client is not None:
+            self._agent_room_client.remove_listener(self._on_agent_room_snapshot)
+            await self._agent_room_client.close()
+            self._agent_room_client = None
         await self._stop_team_workspace()
         await self._queue.shutdown()
         await self._loop_runner.stop()

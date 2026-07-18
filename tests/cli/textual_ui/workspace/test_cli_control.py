@@ -45,7 +45,9 @@ async def test_control_defers_one_valid_action_and_clears_it_on_take() -> None:
 
 
 @pytest.mark.asyncio
-async def test_control_rejects_unregistered_commands_subagents_and_second_action() -> None:
+async def test_control_rejects_unregistered_commands_subagents_and_second_action() -> (
+    None
+):
     control = _control()
 
     with pytest.raises(ValueError, match="available slash command"):

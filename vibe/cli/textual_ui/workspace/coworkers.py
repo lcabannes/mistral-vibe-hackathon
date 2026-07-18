@@ -59,21 +59,22 @@ class CoworkersViewModel:
 def _state_presentation(state: AgentRunState) -> tuple[str, str, str]:
     match state:
         case AgentRunState.IDLE:
-            return "○", "idle", "state-idle"
+            presentation = "○", "idle", "state-idle"
         case AgentRunState.REQUESTED:
-            return "◌", "queued", "state-warning"
+            presentation = "◌", "queued", "state-warning"
         case AgentRunState.RUNNING:
-            return "◐", "running", "state-working"
+            presentation = "◐", "running", "state-working"
         case AgentRunState.WORKING:
-            return "●", "working", "state-working"
+            presentation = "●", "working", "state-working"
         case AgentRunState.ATTENTION:
-            return "!", "attention", "state-attention"
+            presentation = "!", "attention", "state-attention"
         case AgentRunState.FAILED:
-            return "×", "failed", "state-failed"
+            presentation = "×", "failed", "state-failed"
         case AgentRunState.COMPLETED:
-            return "✓", "finished", "state-finished"
-        case AgentRunState.CANCELLED:
-            return "○", "cancelled", "state-idle"
+            presentation = "✓", "finished", "state-finished"
+        case AgentRunState.CANCELLED | AgentRunState.STOPPED:
+            presentation = "○", "cancelled", "state-idle"
+    return presentation
 
 
 def _member_presentation(member: CoworkerViewModel) -> tuple[str, str, str]:
@@ -93,7 +94,9 @@ def _member_presentation(member: CoworkerViewModel) -> tuple[str, str, str]:
 def _connection_text(view: CoworkersViewModel) -> Text:
     member_count = len(view.members)
     member_label = "member" if member_count == 1 else "members"
-    text = Text(f"{view.workspace_name}  ·  {member_count} {member_label}", style="bold")
+    text = Text(
+        f"{view.workspace_name}  ·  {member_count} {member_label}", style="bold"
+    )
     text.append("  ·  ")
     match view.connection_state:
         case "connected":
@@ -116,7 +119,7 @@ class CoworkersPage(ResponsiveWorkspacePage):
     can_focus = True
 
     BINDINGS: ClassVar[list[BindingType]] = [
-        Binding("backspace", "back", "Back", show=False),
+        Binding("backspace", "back", "Back", show=False)
     ]
 
     DEFAULT_CSS = """
@@ -293,7 +296,9 @@ class CoworkersPage(ResponsiveWorkspacePage):
         self._view = view
         member_ids = {member.member_id for member in view.members}
         if self._selected_member_id not in member_ids:
-            self._selected_member_id = view.members[0].member_id if view.members else None
+            self._selected_member_id = (
+                view.members[0].member_id if view.members else None
+            )
             self._selected_run_id = None
         if not self.is_mounted:
             return
@@ -360,9 +365,7 @@ class CoworkersPage(ResponsiveWorkspacePage):
         event.stop()
         self._selected_run_id = event.option.id
         self.add_class("run-detail")
-        self.query_one("#coworker-run-detail", Static).update(
-            self._run_detail_text()
-        )
+        self.query_one("#coworker-run-detail", Static).update(self._run_detail_text())
         self.focus()
 
     def _refresh_detail(self) -> None:
@@ -377,9 +380,7 @@ class CoworkersPage(ResponsiveWorkspacePage):
         if self._selected_run_id is not None:
             agents.highlighted = self._agent_index(self._selected_run_id)
         self.query_one("#coworker-activity", Static).update(self._activity_text())
-        self.query_one("#coworker-run-detail", Static).update(
-            self._run_detail_text()
-        )
+        self.query_one("#coworker-run-detail", Static).update(self._run_detail_text())
 
     def _member_options(self) -> tuple[Option, ...]:
         if not self._view.members:
@@ -461,9 +462,7 @@ class CoworkersPage(ResponsiveWorkspacePage):
         member = self._selected_member()
         if member is None:
             return Text(
-                self._view.error
-                or self._view.join_hint
-                or "No coworker selected",
+                self._view.error or self._view.join_hint or "No coworker selected",
                 style="dim",
             )
         glyph, state, _style = _member_presentation(member)

@@ -65,6 +65,10 @@ class TeamActivity(
     ToolUIData[TeamActivityArgs, TeamActivityResult],
 ):
     @classmethod
+    def get_status_text(cls) -> str:
+        return "Reading team activity"
+
+    @classmethod
     def is_available(cls, config: AnyVibeConfig | None = None) -> bool:
         return bool(
             config is not None

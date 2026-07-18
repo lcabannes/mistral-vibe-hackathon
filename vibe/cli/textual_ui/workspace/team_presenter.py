@@ -30,6 +30,10 @@ _ACTIVE_STATES = frozenset({
     ActivityState.WORKING,
     ActivityState.ATTENTION,
 })
+_NOW_SECONDS = 5
+_SECONDS_PER_MINUTE = 60
+_MINUTES_PER_HOUR = 60
+_HOURS_PER_DAY = 24
 
 
 def _agent_state(state: ActivityState) -> AgentRunState:
@@ -39,43 +43,42 @@ def _agent_state(state: ActivityState) -> AgentRunState:
 def _summary_label(summary: ActivitySummary | None) -> str:
     match summary:
         case ActivitySummary.STARTING:
-            return "Starting"
+            label = "Starting"
         case ActivitySummary.THINKING:
-            return "Thinking"
+            label = "Thinking"
         case ActivitySummary.USING_TOOL:
-            return "Using tool"
+            label = "Using tool"
         case ActivitySummary.WAITING_FOR_APPROVAL:
-            return "Waiting for approval"
+            label = "Waiting for approval"
         case ActivitySummary.WAITING_FOR_INPUT:
-            return "Waiting for input"
+            label = "Waiting for input"
         case ActivitySummary.FINISHED:
-            return "Finished"
+            label = "Finished"
         case ActivitySummary.FAILED:
-            return "Failed"
+            label = "Failed"
         case ActivitySummary.CANCELLED:
-            return "Cancelled"
+            label = "Cancelled"
         case None:
-            return ""
+            label = ""
+    return label
 
 
 def _age_label(age: timedelta) -> str:
     seconds = max(0, int(age.total_seconds()))
-    if seconds < 5:
+    if seconds < _NOW_SECONDS:
         return "now"
-    if seconds < 60:
+    if seconds < _SECONDS_PER_MINUTE:
         return f"{seconds}s ago"
-    minutes = seconds // 60
-    if minutes < 60:
+    minutes = seconds // _SECONDS_PER_MINUTE
+    if minutes < _MINUTES_PER_HOUR:
         return f"{minutes}m ago"
-    hours = minutes // 60
-    if hours < 24:
+    hours = minutes // _MINUTES_PER_HOUR
+    if hours < _HOURS_PER_DAY:
         return f"{hours}h ago"
-    return f"{hours // 24}d ago"
+    return f"{hours // _HOURS_PER_DAY}d ago"
 
 
-def _member_presence(
-    member: TeamMemberSnapshot, connection: ConnectionState
-) -> str:
+def _member_presence(member: TeamMemberSnapshot, connection: ConnectionState) -> str:
     if member.presence is PresenceState.OFFLINE:
         return "offline"
     if connection is ConnectionState.DEGRADED:
@@ -117,8 +120,7 @@ def coworkers_view(snapshot: TeamWorkspaceSnapshot) -> CoworkersViewModel:
 
     members: list[CoworkerViewModel] = []
     for member in sorted(
-        snapshot.members,
-        key=lambda item: _member_sort_key(item, snapshot.runs),
+        snapshot.members, key=lambda item: _member_sort_key(item, snapshot.runs)
     ):
         member_runs = tuple(
             sorted(runs_by_member.get(member.member_id, ()), key=_run_sort_key)
@@ -144,10 +146,7 @@ def coworkers_view(snapshot: TeamWorkspaceSnapshot) -> CoworkersViewModel:
             )
             for run in member_runs
         )
-        recent_summary = next(
-            (agent.summary for agent in agents if agent.summary),
-            "",
-        )
+        recent_summary = next((agent.summary for agent in agents if agent.summary), "")
         members.append(
             CoworkerViewModel(
                 member_id=member.member_id,
@@ -155,9 +154,7 @@ def coworkers_view(snapshot: TeamWorkspaceSnapshot) -> CoworkersViewModel:
                 presence=_member_presence(member, snapshot.connection_state),
                 branch=member.branch,
                 summary=recent_summary,
-                updated_label=_age_label(
-                    snapshot.generated_at - member.last_seen_at
-                ),
+                updated_label=_age_label(snapshot.generated_at - member.last_seen_at),
                 active_run_count=member.active_run_count,
                 agents=agents,
             )
@@ -200,8 +197,7 @@ def team_activity_snapshot(snapshot: TeamWorkspaceSnapshot) -> AgentActivitySnap
         for run in snapshot.runs
     )
     return AgentActivitySnapshot(
-        session_id=snapshot.identity.workspace_id,
-        activities=activities,
+        session_id=snapshot.identity.workspace_id, activities=activities
     )
 
 

@@ -4,6 +4,7 @@ import asyncio
 from typing import cast
 from unittest.mock import AsyncMock
 
+import httpx
 from pydantic import BaseModel
 import pytest
 from textual.binding import Binding
@@ -23,6 +24,7 @@ from vibe.cli.textual_ui.workspace.coworkers import CoworkersPage
 from vibe.cli.textual_ui.workspace.models import AgentRunState, WorkspaceView
 from vibe.cli.textual_ui.workspace.navigation import WorkspaceNavigation
 from vibe.cli.textual_ui.workspace.pages import AgentsPage, HomePage, OfficePage
+from vibe.core.agent_room import AgentRoomClient
 from vibe.core.config import MCPStdio
 from vibe.core.control_port import CLINavigateWorkspaceRequest, WorkspaceDestination
 from vibe.core.tools.builtins.ask_user_question import (
@@ -45,6 +47,65 @@ def _task_event(tool_call_id: str = "task-1") -> ToolCallEvent:
         tool_class=Task,
         args=TaskArgs(task="inspect workspace", agent="explore"),
     )
+
+
+@pytest.mark.asyncio
+async def test_agent_home_uses_the_discovered_room_as_management_backend() -> None:
+    def room_api(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "api_version": 1,
+                "instance_id": "shared-room",
+                "revision": 7,
+                "connected": True,
+                "workspace": {"integration_branch": "codex/agent-home-staging"},
+                "profiles": [{"name": "default", "display_name": "Default"}],
+                "activities": [
+                    {
+                        "tool_call_id": "agent-shared",
+                        "child_session_id": "session-shared",
+                        "agent_name": "default",
+                        "agent_display_name": "Shared builder",
+                        "task": "Implement the shared backend",
+                        "state": "idle",
+                        "runtime_live": True,
+                        "conversation": [
+                            {
+                                "id": "message-shared",
+                                "role": "assistant",
+                                "content": "Visible in both clients",
+                                "status": "succeeded",
+                            }
+                        ],
+                        "usage": {"prompt_tokens": 40, "completion_tokens": 10},
+                        "context_tokens": 50,
+                        "context_limit": 1000,
+                        "estimated_cost_usd": 0.002,
+                        "group_id": "implementation",
+                        "branch": "room-shared-builder",
+                        "worktree_path": "/tmp/room-shared-builder",
+                    }
+                ],
+            },
+        )
+
+    client = AgentRoomClient(
+        "http://127.0.0.1:4173",
+        "primary-session",
+        transport=httpx.MockTransport(room_api),
+    )
+    app = build_test_vibe_app(agent_room_client=client)
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app.agent_loop.agent_management is client
+        office = app.query_one(OfficePage)
+        activity = office._view.snapshot.activities[0]
+        assert activity.managed_agent_id == "agent-shared"
+        assert activity.conversation[-1].content == "Visible in both clients"
+        assert activity.context_tokens == 50
+        assert activity.worktree_path == "/tmp/room-shared-builder"
 
 
 @pytest.mark.asyncio
@@ -259,9 +320,7 @@ async def test_workspace_default_pages_fit_initial_viewport(
                     cost = page.query_one("#usage-cost")
                     assert cost.region.bottom <= page.region.bottom
                 case WorkspaceView.COWORKERS:
-                    roster = app.query_one(CoworkersPage).query_one(
-                        "#coworkers-list"
-                    )
+                    roster = app.query_one(CoworkersPage).query_one("#coworkers-list")
                     assert roster.region.bottom <= page.region.bottom
 
 

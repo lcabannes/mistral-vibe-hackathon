@@ -464,6 +464,7 @@ def build_test_vibe_app(
         "startup",
         StartupOptions(initial_prompt=initial_prompt, is_resuming_session=True),
     )
+    kwargs.setdefault("agent_room_client", False)
 
     return VibeApp(
         agent_loop=resolved_agent_loop,

@@ -47,9 +47,7 @@ async def build_default_orchestrator(
         DefaultConfigLayer(schema=VibeConfigSchema),
         DiscoveredConfigLayer(),
         toml_layer,
-        OverridesLayer(
-            data=team_workspace_config_data(), name="team-metadata"
-        ),
+        OverridesLayer(data=team_workspace_config_data(), name="team-metadata"),
         EnvironmentLayer(schema=VibeConfigSchema),
         OverridesLayer(data=data or {}),
         AgentProfileLayer(),

@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="A visual control room for Mistral Vibe agents."
+    />
+    <title>Vibe Agent Room</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="#" aria-label="Vibe Agent Room">
+          <img
+            src="../../distribution/zed/icons/mistral_vibe.svg"
+            alt=""
+            width="28"
+            height="28"
+          />
+          <span>VIBE</span>
+          <span class="brand-section">Agent room</span>
+        </a>
+
+        <div class="feed-controls">
+          <span class="feed-status" id="feed-status"><i></i><span>Demo feed</span></span>
+          <button class="button" id="simulate-button" type="button">
+            Pause motion
+          </button>
+        </div>
+      </header>
+
+      <aside class="sidebar" aria-label="Room navigation">
+        <nav class="primary-nav" aria-label="Primary">
+          <button class="nav-item is-active" type="button" aria-current="page">
+            <span class="nav-glyph room-glyph" aria-hidden="true"></span>
+            Room
+          </button>
+          <button class="nav-item" type="button" disabled>
+            <span class="nav-glyph agents-glyph" aria-hidden="true"></span>
+            Agents
+          </button>
+          <button class="nav-item" type="button" disabled>
+            <span class="nav-glyph runs-glyph" aria-hidden="true"></span>
+            Runs
+          </button>
+        </nav>
+
+        <div class="group-nav">
+          <div class="sidebar-heading">
+            <span>Groups</span>
+            <button
+              class="icon-button"
+              id="add-group-button"
+              type="button"
+              aria-label="Add group"
+              title="Add group"
+            >
+              +
+            </button>
+          </div>
+          <div id="group-list" class="group-list"></div>
+        </div>
+
+        <div class="sidebar-foot">
+          <span class="avatar">LC</span>
+          <span>
+            <strong>Local workspace</strong>
+            <small id="workspace-branch">Local branch</small>
+          </span>
+        </div>
+      </aside>
+
+      <main class="main-content">
+        <section class="room-header" aria-labelledby="room-title">
+          <div>
+            <p class="eyebrow">Control home</p>
+            <h1 id="room-title">The agent room</h1>
+          </div>
+          <div class="summary-strip" aria-label="Agent summary">
+            <div><strong id="summary-running">0</strong><span>Running</span></div>
+            <div><strong id="summary-attention">0</strong><span>Needs you</span></div>
+            <div><strong id="summary-past">0</strong><span>Past</span></div>
+            <div><strong id="summary-idle">0</strong><span>Idle</span></div>
+          </div>
+          <p class="coordination-strip" id="coordination-strip">
+            Isolated agent runtime
+          </p>
+        </section>
+
+        <section class="room-toolbar" aria-label="Room controls">
+          <div class="segmented-control" id="status-filters">
+            <button class="is-active" type="button" data-filter="all" aria-pressed="true">All</button>
+            <button type="button" data-filter="live" aria-pressed="false">Running</button>
+            <button type="button" data-filter="attention" aria-pressed="false">Needs you</button>
+            <button type="button" data-filter="past" aria-pressed="false">Past</button>
+          </div>
+          <div class="toolbar-actions">
+            <label class="search-control">
+              <span class="search-glyph" aria-hidden="true"></span>
+              <span class="sr-only">Search agents</span>
+              <input id="agent-search" type="search" placeholder="Search agents" />
+            </label>
+            <button class="button button-orange" id="new-agent-button" type="button">
+              + Agent
+            </button>
+            <button class="button" id="toolbar-add-group-button" type="button">
+              New group
+            </button>
+          </div>
+        </section>
+
+        <p class="sr-only" id="room-announcer" role="status" aria-live="polite"></p>
+        <section class="room-stage" id="room-stage">
+          <div class="room-window" aria-hidden="true">
+            <span></span><span></span><span></span>
+          </div>
+          <div class="wall-art" aria-hidden="true">
+            <img
+              src="../../distribution/zed/icons/mistral_vibe.svg"
+              alt=""
+              width="28"
+              height="28"
+            />
+          </div>
+          <div class="office-clock" aria-label="Local time" id="office-clock"></div>
+          <div class="zones" id="zones"></div>
+          <div class="empty-state" id="empty-state" hidden>
+            <strong>No agents here</strong>
+            <span>Try another view or search.</span>
+          </div>
+        </section>
+      </main>
+
+      <aside
+        class="detail-panel"
+        id="detail-panel"
+        aria-labelledby="detail-title"
+        hidden
+        inert
+      >
+        <div class="detail-topbar">
+          <span>Agent details</span>
+          <button
+            class="icon-button"
+            id="close-detail-button"
+            type="button"
+            aria-label="Close details"
+            title="Close details"
+          >
+            ×
+          </button>
+        </div>
+        <div class="detail-content" id="detail-content"></div>
+      </aside>
+    </div>
+
+    <dialog id="group-dialog" class="group-dialog">
+      <form method="dialog" id="group-form">
+        <div class="dialog-heading">
+          <div>
+            <p class="eyebrow">New team</p>
+            <h2>Create a group</h2>
+          </div>
+          <button
+            class="icon-button"
+            value="cancel"
+            formnovalidate
+            aria-label="Close"
+            title="Close"
+          >
+            ×
+          </button>
+        </div>
+        <label>
+          Group name
+          <input
+            id="group-name"
+            name="group-name"
+            maxlength="22"
+            autocomplete="off"
+            required
+          />
+        </label>
+        <div class="swatch-field">
+          <span>Color</span>
+          <div class="swatches" id="group-swatches"></div>
+        </div>
+        <div class="dialog-actions">
+          <button class="button" value="cancel" formnovalidate>Cancel</button>
+          <button class="button button-orange" value="default">Create group</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="agent-dialog" class="agent-dialog">
+      <form method="dialog" id="agent-form">
+        <div class="dialog-heading">
+          <div>
+            <p class="eyebrow">New room member</p>
+            <h2>Create an agent</h2>
+          </div>
+          <button
+            class="icon-button"
+            value="cancel"
+            formnovalidate
+            aria-label="Close"
+            title="Close"
+          >
+            ×
+          </button>
+        </div>
+
+        <div class="agent-form-grid">
+          <label class="agent-name-field">
+            Display name
+            <input
+              id="agent-name"
+              name="agent-name"
+              maxlength="24"
+              autocomplete="off"
+              placeholder="e.g. Pixel"
+              required
+            />
+          </label>
+          <label>
+            Group
+            <select id="agent-group" name="agent-group" required></select>
+          </label>
+          <label>
+            Agent profile
+            <select id="agent-profile" name="agent-profile">
+              <option value="default">Default</option>
+              <option value="plan">Plan</option>
+            </select>
+          </label>
+        </div>
+
+        <fieldset class="agent-capabilities">
+          <legend>Capabilities</legend>
+          <label class="capability-toggle">
+            <input id="agent-auto-approve" type="checkbox" checked />
+            <span>Auto-approve tool calls</span>
+          </label>
+          <div class="tool-picker-heading">
+            <strong>Tools</strong>
+            <label>
+              <input id="agent-tools-all" type="checkbox" checked />
+              <span>Select all</span>
+            </label>
+          </div>
+          <div class="agent-tool-list" id="agent-tool-list"></div>
+        </fieldset>
+
+        <label>
+          First task
+          <textarea
+            id="agent-task"
+            name="agent-task"
+            rows="4"
+            maxlength="4000"
+            placeholder="What should this agent work on?"
+            required
+          ></textarea>
+        </label>
+
+        <p class="dialog-notice" id="agent-dialog-notice">
+          This launches a bounded real Vibe run using the selected profile.
+        </p>
+        <p class="dialog-error" id="agent-dialog-error" role="alert" hidden></p>
+
+        <div class="dialog-actions">
+          <button class="button" value="cancel" formnovalidate>Cancel</button>
+          <button class="button button-orange" id="agent-submit" value="default">
+            Launch agent
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <template id="cat-template">
+      <article class="agent" draggable="true">
+        <button class="agent-main" type="button">
+          <span class="activity-bubble"></span>
+          <span class="cat-wrap" aria-hidden="true">
+            <span class="cat-shadow"></span>
+            <span class="cat-tail"></span>
+            <span class="cat-body">
+              <span class="cat-patch"></span>
+              <span class="cat-paw cat-paw-left"></span>
+              <span class="cat-paw cat-paw-right"></span>
+            </span>
+            <span class="cat-head">
+              <span class="cat-ear cat-ear-left"></span>
+              <span class="cat-ear cat-ear-right"></span>
+              <span class="cat-face-patch"></span>
+              <span class="cat-eye cat-eye-left"></span>
+              <span class="cat-eye cat-eye-right"></span>
+              <span class="cat-nose"></span>
+              <span class="cat-mouth"></span>
+            </span>
+            <span class="cat-prop"></span>
+            <span class="sleep-mark">z</span>
+          </span>
+          <span class="agent-label">
+            <strong></strong>
+            <span class="status-label"></span>
+          </span>
+        </button>
+        <div class="agent-actions" role="group">
+          <button type="button" data-agent-action="chat" title="Open chat">
+            <span class="action-glyph chat-action-glyph" aria-hidden="true"></span>
+            <span class="sr-only">Open chat</span>
+          </button>
+          <button type="button" data-agent-action="history" title="View history">
+            <span class="action-glyph history-action-glyph" aria-hidden="true"></span>
+            <span class="sr-only">View history</span>
+          </button>
+          <button type="button" data-agent-action="status" title="View status">
+            <span class="action-glyph status-action-glyph" aria-hidden="true"></span>
+            <span class="sr-only">View status</span>
+          </button>
+        </div>
+      </article>
+    </template>
+
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

@@ -41,9 +41,9 @@ class TextualCLIControl:
 
         match request:
             case CLICommandRequest(command=command):
-                if not command.startswith("/") or not self._command_registry.parse_command(
-                    command
-                ):
+                if not command.startswith(
+                    "/"
+                ) or not self._command_registry.parse_command(command):
                     raise ValueError("Command must be an available slash command")
                 message = f"Deferred command {command.split(maxsplit=1)[0]}"
             case CLISwitchAgentRequest(profile=profile):
