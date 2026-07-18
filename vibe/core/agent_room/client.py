@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncGenerator, Callable
+from http import HTTPStatus
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import time
@@ -22,6 +24,7 @@ DEFAULT_AGENT_ROOM_URL = "http://127.0.0.1:4173"
 AGENT_ROOM_DISCOVERY_FILE = "agent-room/server.json"
 POLL_INTERVAL_SECONDS = 1.0
 BACKEND_STARTUP_TIMEOUT_SECONDS = 45.0
+BACKEND_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 
 type AgentRoomListener = Callable[[AgentRoomSnapshot], None]
 
@@ -34,10 +37,7 @@ def _vibe_home() -> Path:
     return Path(os.environ.get("VIBE_HOME", "~/.vibe")).expanduser()
 
 
-def discover_agent_room() -> str | None:
-    configured = os.environ.get("VIBE_AGENT_ROOM_URL")
-    if configured:
-        return configured.rstrip("/")
+def _read_agent_room_discovery() -> dict[str, Any] | None:
     try:
         payload = json.loads(
             (_vibe_home() / AGENT_ROOM_DISCOVERY_FILE).read_text(encoding="utf-8")
@@ -50,22 +50,30 @@ def discover_agent_room() -> str | None:
         "http://localhost:",
     )):
         return None
-    return url.rstrip("/")
+    return {**payload, "url": url.rstrip("/")}
 
 
-def launch_agent_room_backend(
+def discover_agent_room() -> str | None:
+    configured = os.environ.get("VIBE_AGENT_ROOM_URL")
+    if configured:
+        return configured.rstrip("/")
+    discovery = _read_agent_room_discovery()
+    return str(discovery["url"]) if discovery is not None else None
+
+
+def _spawn_agent_room_backend(
     workdir: Path,
     *,
-    port: int = 4173,
-    network_mode: str = "auto",
-    force: bool = False,
-) -> bool:
+    port: int,
+    network_mode: str,
+    force: bool,
+) -> subprocess.Popen[bytes] | None:
     if not force and os.environ.get("VIBE_AGENT_ROOM_AUTOSTART", "1") == "0":
-        return False
+        return None
     repository_root = Path(__file__).resolve().parents[3]
     server = repository_root / "web" / "agent-room" / "server.py"
     if not server.is_file() or not workdir.is_dir():
-        return False
+        return None
     try:
         git_repository = subprocess.run(
             ["git", "-C", str(workdir), "rev-parse", "--show-toplevel"],
@@ -75,8 +83,8 @@ def launch_agent_room_backend(
             timeout=5,
         )
         if git_repository.returncode != 0:
-            return False
-        subprocess.Popen(
+            return None
+        return subprocess.Popen(
             [
                 sys.executable,
                 str(server),
@@ -93,19 +101,110 @@ def launch_agent_room_backend(
             start_new_session=True,
         )
     except (OSError, subprocess.SubprocessError):
-        return False
-    return True
+        return None
+
+
+def launch_agent_room_backend(
+    workdir: Path,
+    *,
+    port: int = 4173,
+    network_mode: str = "auto",
+    force: bool = False,
+) -> bool:
+    return (
+        _spawn_agent_room_backend(
+            workdir,
+            port=port,
+            network_mode=network_mode,
+            force=force,
+        )
+        is not None
+    )
 
 
 def _agent_room_reachable(url: str, *, timeout: float = 0.5) -> bool:
     try:
         with httpx.Client(base_url=url, timeout=timeout, trust_env=False) as client:
-            response = client.get("/api/agent-runs")
+            response = client.get("/api/health")
+            if response.status_code == HTTPStatus.NOT_FOUND:
+                response = client.get("/api/agent-runs")
             response.raise_for_status()
             payload = response.json()
     except (httpx.HTTPError, ValueError):
         return False
     return isinstance(payload, dict) and payload.get("connected") is True
+
+
+def _pid_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _is_agent_room_process(pid: int) -> bool:
+    if os.name == "nt":
+        return False
+    try:
+        process = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    command = process.stdout.replace("\\", "/")
+    return process.returncode == 0 and "web/agent-room/server.py" in command
+
+
+def _remove_discovery_for_pid(pid: int) -> None:
+    discovery = _read_agent_room_discovery()
+    if discovery is None or discovery.get("pid") != pid:
+        return
+    try:
+        (_vibe_home() / AGENT_ROOM_DISCOVERY_FILE).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _wait_for_pid_exit(pid: int, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while _pid_exists(pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    return not _pid_exists(pid)
+
+
+def _terminate_agent_room_process(pid: int) -> bool:
+    if not _is_agent_room_process(pid):
+        return False
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        return False
+    if _wait_for_pid_exit(pid, BACKEND_SHUTDOWN_TIMEOUT_SECONDS):
+        return True
+    if not _is_agent_room_process(pid):
+        return False
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        return False
+    return _wait_for_pid_exit(pid, 1.0)
+
+
+def _stop_unresponsive_owner(discovery: dict[str, Any]) -> bool:
+    pid = discovery.get("pid")
+    if not isinstance(pid, int) or pid <= 1 or pid == os.getpid():
+        return False
+    if _pid_exists(pid) and not _terminate_agent_room_process(pid):
+        return False
+    _remove_discovery_for_pid(pid)
+    return True
 
 
 def ensure_agent_room_backend(
@@ -116,16 +215,29 @@ def ensure_agent_room_backend(
     startup_timeout: float = BACKEND_STARTUP_TIMEOUT_SECONDS,
 ) -> str:
     """Return a healthy shared backend URL, starting one when necessary."""
+    configured = os.environ.get("VIBE_AGENT_ROOM_URL")
+    discovery = _read_agent_room_discovery()
     discovered = discover_agent_room()
     if discovered is not None and _agent_room_reachable(discovered):
         return discovered
 
+    if (
+        configured is None
+        and discovery is not None
+        and discovery.get("url") == discovered
+        and not _stop_unresponsive_owner(discovery)
+    ):
+        raise AgentRoomUnavailable(
+            "The discovered Agent Room is unresponsive and could not be stopped"
+        )
+
     target = f"http://127.0.0.1:{port}"
     if target != discovered and _agent_room_reachable(target):
         return target
-    if not launch_agent_room_backend(
+    process = _spawn_agent_room_backend(
         workdir, port=port, network_mode=network_mode, force=True
-    ):
+    )
+    if process is None:
         raise AgentRoomUnavailable(
             "Agent Room server is unavailable from this Vibe installation"
         )
@@ -134,6 +246,10 @@ def ensure_agent_room_backend(
     while time.monotonic() < deadline:
         if _agent_room_reachable(target):
             return target
+        if process.poll() is not None:
+            raise AgentRoomUnavailable(
+                f"Agent Room exited during startup with status {process.returncode}"
+            )
         time.sleep(0.1)
     raise AgentRoomUnavailable(
         f"Agent Room did not become ready at {target} within "

@@ -83,6 +83,8 @@ PROXY_ENV_KEYS = (
     "all_proxy",
 )
 NETWORK_PROBE_URL = "https://api.mistral.ai/v1/models"
+WORKTREE_STATUS_REFRESH_SECONDS = 5.0
+WORKTREE_STATUS_TIMEOUT_SECONDS = 5.0
 
 
 class AgentWorker:
@@ -209,6 +211,8 @@ class AgentRoomStore:
         self._revision = 0
         self._lifecycle_locks: dict[str, RLock] = {}
         self._workers: dict[str, AgentWorker] = {}
+        self._worktree_refreshing: set[str] = set()
+        self._worktree_refreshed_at: dict[str, float] = {}
         vibe_home = Path(os.environ.get("VIBE_HOME", "~/.vibe")).expanduser()
         self._session_root = vibe_home / "logs" / "session"
         self._registry_path = vibe_home / "agent-room" / "runs.json"
@@ -224,8 +228,8 @@ class AgentRoomStore:
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
-            for run in self._runs.values():
-                self._refresh_worktree_status_locked(run)
+            for run_id, run in self._runs.items():
+                self._schedule_worktree_status_refresh_locked(run_id, run)
             return {
                 "api_version": API_VERSION,
                 "instance_id": self._instance_id,
@@ -241,6 +245,13 @@ class AgentRoomStore:
                 "coordination": self._coordination_locked(),
                 "network": deepcopy(self._network),
             }
+
+    def health(self) -> dict[str, Any]:
+        return {
+            "api_version": API_VERSION,
+            "instance_id": self._instance_id,
+            "connected": True,
+        }
 
     def create(self, payload: dict[str, Any]) -> dict[str, Any]:
         profile = (
@@ -626,7 +637,7 @@ class AgentRoomStore:
                     message["error_code"] = "queue_full"
                 run["error"] = str(payload.get("error") or "Prompt failed")
             run["updated_at"] = now
-            self._refresh_worktree_status_locked(run)
+            self._schedule_worktree_status_refresh_locked(worker.run_id, run)
             self._persist_locked()
         if event_type in {"ready", "state", "usage"}:
             self._broadcast_management_snapshot()
@@ -1241,37 +1252,93 @@ class AgentRoomStore:
             "validation_summary": summary,
         }
 
-    def _refresh_worktree_status_locked(self, run: dict[str, Any]) -> None:
+    def _schedule_worktree_status_refresh_locked(
+        self, run_id: str, run: dict[str, Any]
+    ) -> None:
         path_value = run.get("worktree_path")
         base_commit = run.get("base_commit")
         branch = run.get("branch")
         if not path_value or not base_commit or not branch:
             return
-        path = Path(str(path_value))
-        if not path.is_dir():
-            run["worktree_missing"] = True
+        now = time.monotonic()
+        if run_id in self._worktree_refreshing or (
+            now - self._worktree_refreshed_at.get(run_id, 0)
+            < WORKTREE_STATUS_REFRESH_SECONDS
+        ):
             return
-        try:
-            status = git_output(
-                path, "status", "--porcelain", "--untracked-files=all"
-            ).splitlines()
-            run["uncommitted_files"] = len(status)
-            run["worktree_dirty"] = bool(status)
-            run["new_commit_count"] = int(
-                git_output(
-                    path, "rev-list", "--count", f"{base_commit}..{branch}"
-                ).strip()
-            )
-            if run.get("merge_status") not in {"validating", "merged"}:
-                run["merge_status"] = (
+        self._worktree_refreshing.add(run_id)
+        self._worktree_refreshed_at[run_id] = now
+        Thread(
+            target=self._refresh_worktree_status,
+            args=(run_id, str(path_value), str(base_commit), str(branch)),
+            name=f"room-git-{run_id}",
+            daemon=True,
+        ).start()
+
+    def _refresh_worktree_status(
+        self, run_id: str, path_value: str, base_commit: str, branch: str
+    ) -> None:
+        path = Path(path_value)
+        updates: dict[str, Any]
+        if not path.is_dir():
+            updates = {"worktree_missing": True}
+        else:
+            updates = self._read_worktree_status(path, base_commit, branch)
+        with self._lock:
+            self._worktree_refreshing.discard(run_id)
+            run = self._runs.get(run_id)
+            if run is None or (
+                str(run.get("worktree_path")) != path_value
+                or str(run.get("base_commit")) != base_commit
+                or str(run.get("branch")) != branch
+            ):
+                return
+            if (
+                "new_commit_count" in updates
+                and run.get("merge_status") not in {"validating", "merged"}
+            ):
+                updates["merge_status"] = (
                     "ready"
-                    if not status
-                    and run["new_commit_count"] > 0
+                    if not updates["worktree_dirty"]
+                    and updates["new_commit_count"] > 0
                     and not run.get("runtime_live")
                     else "not_ready"
                 )
+            changed = any(run.get(key) != value for key, value in updates.items())
+            run.update(updates)
+            if changed:
+                self._persist_locked()
+
+    @staticmethod
+    def _read_worktree_status(
+        path: Path, base_commit: str, branch: str
+    ) -> dict[str, Any]:
+        try:
+            status = git_output(
+                path,
+                "status",
+                "--porcelain",
+                "--untracked-files=all",
+                timeout=WORKTREE_STATUS_TIMEOUT_SECONDS,
+            ).splitlines()
+            new_commit_count = int(
+                git_output(
+                    path,
+                    "rev-list",
+                    "--count",
+                    f"{base_commit}..{branch}",
+                    timeout=WORKTREE_STATUS_TIMEOUT_SECONDS,
+                ).strip()
+            )
+            return {
+                "worktree_missing": False,
+                "worktree_status_error": False,
+                "uncommitted_files": len(status),
+                "worktree_dirty": bool(status),
+                "new_commit_count": new_commit_count,
+            }
         except (OSError, subprocess.SubprocessError, ValueError):
-            run["worktree_status_error"] = True
+            return {"worktree_status_error": True}
 
     def _load_profiles(self) -> list[dict[str, str]]:
         config = VibeConfig.load()
@@ -1598,13 +1665,13 @@ class suppress_errors:
         return True
 
 
-def git_output(path: Path, *args: str) -> str:
+def git_output(path: Path, *args: str, timeout: float = 60) -> str:
     result = subprocess.run(
         ["git", "-C", str(path), *args],
         check=True,
         capture_output=True,
         text=True,
-        timeout=60,
+        timeout=timeout,
     )
     return result.stdout
 
@@ -1705,6 +1772,9 @@ class AgentRoomHandler(SimpleHTTPRequestHandler):
             self._send_json({"error": "Loopback access only"}, HTTPStatus.FORBIDDEN)
             return
         path = urlparse(self.path).path
+        if path == "/api/health":
+            self._send_json(self.server.store.health())
+            return
         if path == "/api/agent-runs":
             self._send_json(self.server.store.snapshot())
             return
@@ -1960,6 +2030,11 @@ def main() -> None:
         f"Mistral network: {network['selected_mode']} "
         f"(authenticated={network['authenticated']})"
     )
+
+    def stop_on_signal(_signum: int, _frame: Any) -> None:
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, stop_on_signal)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

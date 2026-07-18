@@ -81,6 +81,8 @@ def store(tmp_path: Path) -> Any:
     instance._lock = room.RLock()
     instance._lifecycle_locks = {}
     instance._workers = {}
+    instance._worktree_refreshing = set()
+    instance._worktree_refreshed_at = {}
     instance._session_root = tmp_path / "sessions"
     instance._registry_path = tmp_path / "runs.json"
     instance._worker_environment = {"PYTHONUNBUFFERED": "1"}
@@ -120,6 +122,67 @@ def test_snapshot_exposes_revisioned_shared_backend_identity(store: Any) -> None
         "workdir": str(store._workdir),
         "integration_branch": "codex/test-room",
     }
+
+
+def test_health_does_not_refresh_git_status(store: Any) -> None:
+    store._runs["worker-1"] = make_run()
+
+    assert store.health() == {
+        "api_version": 1,
+        "instance_id": "test-room-instance",
+        "connected": True,
+    }
+    assert store._worktree_refreshing == set()
+
+
+def test_snapshot_schedules_git_status_without_waiting(
+    store: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started: list[str] = []
+    store._runs["worker-1"] = make_run()
+
+    class DeferredThread:
+        def __init__(self, *, name: str, **_kwargs: Any) -> None:
+            self.name = name
+
+        def start(self) -> None:
+            started.append(self.name)
+
+    monkeypatch.setattr(room, "Thread", DeferredThread)
+
+    snapshot = store.snapshot()
+
+    assert snapshot["activities"][0]["tool_call_id"] == "worker-1"
+    assert started == ["room-git-worker-1"]
+
+
+def test_worktree_status_uses_bounded_git_timeouts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[tuple[str, ...], float]] = []
+
+    def git_output(path: Path, *args: str, timeout: float = 60) -> str:
+        assert path == tmp_path
+        calls.append((args, timeout))
+        return "" if args[0] == "status" else "2\n"
+
+    monkeypatch.setattr(room, "git_output", git_output)
+
+    status = room.AgentRoomStore._read_worktree_status(
+        tmp_path, "base-commit", "worker-branch"
+    )
+
+    assert status["new_commit_count"] == 2
+    assert calls == [
+        (
+            ("status", "--porcelain", "--untracked-files=all"),
+            room.WORKTREE_STATUS_TIMEOUT_SECONDS,
+        ),
+        (
+            ("rev-list", "--count", "base-commit..worker-branch"),
+            room.WORKTREE_STATUS_TIMEOUT_SECONDS,
+        ),
+    ]
 
 
 def test_only_one_backend_can_own_a_vibe_home(
