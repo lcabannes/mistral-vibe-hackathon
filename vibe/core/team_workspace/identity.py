@@ -22,7 +22,7 @@ def _opaque_id(prefix: str, *parts: str) -> str:
 
 def normalize_project_remote(remote: str) -> str:
     value = remote.strip().rstrip("/")
-    if match := _SCP_REMOTE.match(value):
+    if "://" not in value and (match := _SCP_REMOTE.match(value)):
         normalized = f"{match.group('host')}/{match.group('path')}"
     else:
         parsed = urlparse(value)

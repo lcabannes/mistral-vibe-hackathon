@@ -285,16 +285,17 @@ class SharedTeamWorkspaceStore:
         conversations: list[TeamConversationEntry],
         history_limit: int,
     ) -> tuple[TeamRunSnapshot, ...]:
-        seen_event_ids: set[str] = set()
+        seen_event_ids: set[tuple[str, str]] = set()
         runs: dict[str, TeamRunSnapshot] = {}
         started: dict[str, datetime] = {}
         ordered = sorted(
             events, key=lambda item: (item.client_id, item.sequence, item.event_id)
         )
         for event in ordered:
-            if event.event_id in seen_event_ids:
+            event_key = (event.client_id, event.event_id)
+            if event_key in seen_event_ids:
                 continue
-            seen_event_ids.add(event.event_id)
+            seen_event_ids.add(event_key)
             current = runs.get(event.run_id)
             if current is not None and event.sequence <= current.sequence:
                 continue
@@ -319,14 +320,15 @@ class SharedTeamWorkspaceStore:
                 sequence=event.sequence,
             )
         history_by_run: dict[str, list[TeamConversationEntry]] = defaultdict(list)
-        seen_entries: set[str] = set()
+        seen_entries: set[tuple[str, str]] = set()
         for entry in sorted(
             conversations,
             key=lambda item: (item.client_id, item.sequence, item.entry_id),
         ):
-            if entry.entry_id in seen_entries:
+            entry_key = (entry.client_id, entry.entry_id)
+            if entry_key in seen_entries:
                 continue
-            seen_entries.add(entry.entry_id)
+            seen_entries.add(entry_key)
             history_by_run[entry.run_id].append(entry)
         with_history = (
             run.model_copy(
