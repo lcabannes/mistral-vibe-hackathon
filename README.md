@@ -42,10 +42,11 @@ Linux, uv can be installed with:
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-Then clone and install this fork:
+Then clone and install this fork over SSH. Add your public SSH key to your
+[GitHub account](https://github.com/settings/keys) first if needed:
 
 ```bash
-git clone https://github.com/lcabannes/mistral-vibe-hackathon.git
+git clone git@github.com:lcabannes/mistral-vibe-hackathon.git
 cd mistral-vibe-hackathon
 uv sync --no-dev
 ```
