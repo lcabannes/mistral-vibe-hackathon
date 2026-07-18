@@ -79,7 +79,7 @@ class ChatInputBody(VoiceManagerListener, Widget):
             yield self.input_widget
 
     def on_mount(self) -> None:
-        if self.input_widget:
+        if self.input_widget and self.input_widget.is_on_screen:
             self.input_widget.focus()
         if self._voice_manager:
             self._voice_manager.add_listener(self)

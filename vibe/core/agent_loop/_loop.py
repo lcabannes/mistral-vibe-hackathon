@@ -22,8 +22,14 @@ from uuid import uuid4
 from pydantic import BaseModel, ValidationError
 
 from vibe.core.agent_loop_hooks import AgentLoopHooksMixin
+from vibe.core.agents.events import ManagedAgentLifecycleEvent
+from vibe.core.agents.management_port import (
+    AgentManagementPort,
+    ManagedAgentLifecycleListener,
+)
 from vibe.core.agents.manager import AgentManager
 from vibe.core.agents.models import AgentProfile, BuiltinAgentName
+from vibe.core.agents.supervisor import AgentSupervisor
 from vibe.core.autocompletion.path_prompt import build_path_prompt_payload
 from vibe.core.cache_store import InMemoryVibeCodeCacheStore, VibeCodeCacheStore
 from vibe.core.checkpoints import Checkpointer, CheckpointRecorder, FileStore
@@ -37,6 +43,7 @@ from vibe.core.compaction.context import (
 )
 from vibe.core.config import AnyVibeConfig, ModelConfig, ProviderConfig, resolve_api_key
 from vibe.core.config.orchestrator_legacy import LegacyConfigOrchestrator
+from vibe.core.control_port import CLIControlPort
 from vibe.core.experiments import ExperimentManager
 from vibe.core.experiments.client import RemoteEvalClient
 from vibe.core.experiments.session import (
@@ -372,6 +379,9 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self._force_bypass_tool_permissions = force_bypass_tool_permissions
         self._apply_forced_bypass()
         self._headless = headless
+        self._interactive_surface_capabilities_enabled = bool(
+            config.enable_cli_control or config.enable_agent_management
+        )
         self.cache_store = cache_store or InMemoryVibeCodeCacheStore()
 
         self._defer_heavy_init = defer_heavy_init
@@ -446,6 +456,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self.stats = AgentStats()
         self.approval_callback: ApprovalCallback | None = None
         self.user_input_callback: UserInputCallback | None = None
+        self.cli_control: CLIControlPort | None = None
         self.launch_context = launch_context
 
         try:
@@ -478,6 +489,10 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         )
         self.session_logger = SessionLogger(config.session_logging, self.session_id)
         self._hook_config_result = hook_config_result
+        self._agent_supervisor: AgentSupervisor | None = None
+        self._managed_agent_lifecycle_listener: (
+            ManagedAgentLifecycleListener | None
+        ) = None
         self._hooks_manager = (
             HooksManager(hook_config_result.hooks) if hook_config_result else None
         )
@@ -596,7 +611,21 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
 
     @property
     def config(self) -> AnyVibeConfig:
-        return self.agent_manager.config
+        return self._apply_runtime_capability_overrides(
+            self.agent_manager.config, self.agent_profile.name
+        )
+
+    def _apply_runtime_capability_overrides(
+        self, config: AnyVibeConfig, profile_name: str
+    ) -> AnyVibeConfig:
+        enabled = (
+            self._interactive_surface_capabilities_enabled
+            and profile_name == BuiltinAgentName.ORCHESTRATOR
+        )
+        config.enable_orchestrator_controls = enabled
+        config.enable_cli_control = enabled
+        config.enable_agent_management = enabled
+        return config
 
     @property
     def bypass_tool_permissions(self) -> bool:
@@ -632,6 +661,60 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
 
     def set_user_input_callback(self, callback: UserInputCallback) -> None:
         self.user_input_callback = callback
+
+    def set_cli_control_port(self, port: CLIControlPort | None) -> None:
+        self.cli_control = port
+
+    def set_cli_control(self, control: CLIControlPort | None) -> None:
+        self.set_cli_control_port(control)
+
+    def set_managed_agent_lifecycle_listener(
+        self, listener: ManagedAgentLifecycleListener | None
+    ) -> None:
+        self._managed_agent_lifecycle_listener = listener
+        if self._agent_supervisor is not None:
+            self._agent_supervisor.set_lifecycle_listener(listener)
+
+    def enable_interactive_surface_capabilities(self) -> None:
+        if self._interactive_surface_capabilities_enabled:
+            return
+        self._interactive_surface_capabilities_enabled = True
+        self.agent_manager.invalidate_config()
+
+    @property
+    def agent_management(self) -> AgentManagementPort:
+        return self._get_agent_supervisor()
+
+    def _get_agent_supervisor(self) -> AgentSupervisor:
+        if not self.config.enable_agent_management:
+            raise RuntimeError("Agent management is not enabled")
+        if self._agent_supervisor is None:
+            supervisor = AgentSupervisor(
+                base_config_getter=lambda: self.base_config,
+                agent_manager=self.agent_manager,
+                permission_store=self._permission_store,
+                approval_callback_getter=lambda: self.approval_callback,
+                user_input_callback_getter=lambda: self.user_input_callback,
+                parent_session_id_getter=lambda: self.session_id,
+                session_dir_getter=lambda: self.session_logger.session_dir,
+                launch_context=self.launch_context,
+                hook_config_result=self._hook_config_result,
+            )
+            supervisor.set_lifecycle_listener(
+                self._managed_agent_lifecycle_listener
+            )
+            self._agent_supervisor = supervisor
+        return self._agent_supervisor
+
+    async def managed_agent_events(
+        self,
+    ) -> AsyncGenerator[ManagedAgentLifecycleEvent, None]:
+        async for event in self._get_agent_supervisor().subscribe_events():
+            yield event
+
+    async def stop_managed_agents_for_session_change(self) -> None:
+        if self._agent_supervisor is not None:
+            await self._agent_supervisor.stop_for_session_change()
 
     async def set_tool_permission(
         self, tool_name: str, permission: ToolPermission, save_permanently: bool = False
@@ -722,6 +805,9 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self.telemetry_client.send_session_closed()
 
     async def aclose(self) -> None:
+        if self._agent_supervisor is not None:
+            with contextlib.suppress(Exception):
+                await self._agent_supervisor.aclose()
         if (task := self._experiments_task) is not None and not task.done():
             task.cancel()
             with contextlib.suppress(BaseException):
@@ -1856,6 +1942,14 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 hook_config_result=self._hook_config_result,
                 session_id=self.session_id,
                 mcp_pool=self._mcp_pool,
+                agent_management=(
+                    self._get_agent_supervisor()
+                    if self.config.enable_agent_management
+                    else None
+                ),
+                cli_control=(
+                    self.cli_control if self.config.enable_cli_control else None
+                ),
             ),
             **tool_call.args_dict,
         ):
@@ -2284,6 +2378,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
             i += 1
 
     async def _reset_session(self, keep_parent: bool = True) -> None:
+        await self.stop_managed_agents_for_session_change()
         old_session_id = self.session_id
         self.emit_session_closed_telemetry()
         suffix = extract_suffix(self.session_id)
@@ -2480,7 +2575,9 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         # profile -- so an in-flight turn keeps seeing the old, self-consistent config
         # until the synchronous commit flips profile and objects together.
         target_config = (
-            self.agent_manager.preview_config(switch_to_agent)
+            self._apply_runtime_capability_overrides(
+                self.agent_manager.preview_config(switch_to_agent), switch_to_agent
+            )
             if switch_to_agent is not None
             else self.config
         )

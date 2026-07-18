@@ -15,6 +15,7 @@ from vibe.core.config.layers.overrides import OverridesLayer
 from vibe.core.config.layers.project import ProjectConfigLayer
 from vibe.core.config.layers.user import UserConfigLayer
 from vibe.core.config.orchestrator import ConfigOrchestrator
+from vibe.core.config.team_metadata import team_workspace_config_data
 from vibe.core.config.vibe_schema import VibeConfigSchema
 from vibe.core.paths import dedup_paths
 from vibe.core.utils import configure_ssl_context
@@ -46,6 +47,9 @@ async def build_default_orchestrator(
         DefaultConfigLayer(schema=VibeConfigSchema),
         DiscoveredConfigLayer(),
         toml_layer,
+        OverridesLayer(
+            data=team_workspace_config_data(), name="team-metadata"
+        ),
         EnvironmentLayer(schema=VibeConfigSchema),
         OverridesLayer(data=data or {}),
         AgentProfileLayer(),

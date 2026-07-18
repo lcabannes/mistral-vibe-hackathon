@@ -1,0 +1,170 @@
+{
+  "session_id": "hackathon-room-demo",
+  "groups": [
+    { "id": "build", "name": "Build", "color": "#ff8205" },
+    { "id": "research", "name": "Research", "color": "#20a779" },
+    { "id": "review", "name": "Review", "color": "#5874d8" }
+  ],
+  "activities": [
+    {
+      "tool_call_id": "primary:hackathon-room-demo",
+      "parent_session_id": "hackathon-room-demo",
+      "agent_name": "vibe",
+      "agent_display_name": "Vibe",
+      "task": "Coordinate the Agent Control Home workstream",
+      "state": "working",
+      "started_at": 1721304000,
+      "updated_at": 1721304120,
+      "current_activity": "Connecting the activity feed",
+      "turns_used": 8,
+      "usage": { "prompt_tokens": 18420, "completion_tokens": 3910 },
+      "estimated_cost_usd": 0.0187,
+      "model": "devstral-2",
+      "is_primary": true,
+      "group_id": "build",
+      "coat": "orange",
+      "events": ["Read workspace state", "Mapped public events", "Connecting activity feed"],
+      "conversation": [
+        { "role": "user", "content": "Build an agent control room for the hackathon." },
+        { "role": "assistant", "content": "I mapped the live activity states and started the web room." }
+      ]
+    },
+    {
+      "tool_call_id": "call-scout",
+      "parent_session_id": "hackathon-room-demo",
+      "agent_name": "explore",
+      "agent_display_name": "Scout",
+      "task": "Map Mistral's desktop interaction patterns",
+      "state": "running",
+      "started_at": 1721304050,
+      "updated_at": 1721304140,
+      "child_session_id": "child-scout",
+      "current_activity": "Inspecting navigation patterns",
+      "turns_used": 5,
+      "usage": { "prompt_tokens": 9210, "completion_tokens": 1460 },
+      "estimated_cost_usd": 0.0072,
+      "model": "mistral-medium-3.1",
+      "group_id": "research",
+      "coat": "mint",
+      "events": ["Opened product references", "Collected UI patterns", "Inspecting navigation patterns"],
+      "conversation": [
+        { "role": "user", "content": "Map Mistral's desktop interaction patterns." },
+        { "role": "assistant", "content": "The product uses a quiet neutral shell with orange reserved for action and focus." }
+      ]
+    },
+    {
+      "tool_call_id": "call-patch",
+      "parent_session_id": "hackathon-room-demo",
+      "agent_name": "implement",
+      "agent_display_name": "Patch",
+      "task": "Build the local session adapter",
+      "state": "failed",
+      "started_at": 1721303900,
+      "updated_at": 1721304090,
+      "child_session_id": "child-patch",
+      "current_activity": "Type check failed in session adapter",
+      "turns_used": 7,
+      "usage": { "prompt_tokens": 14620, "completion_tokens": 2270 },
+      "estimated_cost_usd": 0.0121,
+      "model": "devstral-2",
+      "group_id": "build",
+      "coat": "rose",
+      "events": ["Added session mapping", "Ran strict type check", "Type check failed in session adapter"],
+      "conversation": [
+        { "role": "user", "content": "Build the local session adapter." },
+        { "role": "assistant", "content": "The adapter is implemented, but strict typing found an incompatible session field." }
+      ]
+    },
+    {
+      "tool_call_id": "call-prism",
+      "parent_session_id": "hackathon-room-demo",
+      "agent_name": "review",
+      "agent_display_name": "Prism",
+      "task": "Review the new workspace navigation",
+      "state": "attention",
+      "started_at": 1721304010,
+      "updated_at": 1721304155,
+      "child_session_id": "child-prism",
+      "current_activity": "Waiting for approval to run a command",
+      "turns_used": 4,
+      "usage": { "prompt_tokens": 6880, "completion_tokens": 980 },
+      "estimated_cost_usd": 0.0053,
+      "model": "mistral-medium-3.1",
+      "group_id": "review",
+      "coat": "blue",
+      "events": ["Checked the workspace layout", "Found a command boundary", "Waiting for approval"],
+      "conversation": [
+        { "role": "user", "content": "Review the workspace navigation." },
+        { "role": "assistant", "content": "I need approval before running the visual regression command." }
+      ]
+    },
+    {
+      "tool_call_id": "call-scribe",
+      "parent_session_id": "hackathon-room-demo",
+      "agent_name": "document",
+      "agent_display_name": "Scribe",
+      "task": "Draft the activity summary",
+      "state": "completed",
+      "started_at": 1721303600,
+      "updated_at": 1721303950,
+      "child_session_id": "child-scribe",
+      "current_activity": "Summary ready",
+      "turns_used": 3,
+      "usage": { "prompt_tokens": 4120, "completion_tokens": 1160 },
+      "estimated_cost_usd": 0.0038,
+      "model": "mistral-small-3.2",
+      "group_id": "research",
+      "coat": "violet",
+      "events": ["Collected run notes", "Drafted activity summary", "Summary ready"],
+      "conversation": [
+        { "role": "user", "content": "Draft the activity summary." },
+        { "role": "assistant", "content": "The summary is ready with active, attention, and completed run totals." }
+      ]
+    },
+    {
+      "tool_call_id": "call-atlas",
+      "parent_session_id": "hackathon-room-demo",
+      "agent_name": "plan",
+      "agent_display_name": "Atlas",
+      "task": "Prepare the next workstream",
+      "state": "idle",
+      "started_at": 1721303500,
+      "updated_at": 1721304000,
+      "child_session_id": "child-atlas",
+      "current_activity": "Ready for a task",
+      "turns_used": 2,
+      "usage": { "prompt_tokens": 2950, "completion_tokens": 720 },
+      "estimated_cost_usd": 0.0024,
+      "model": "mistral-medium-3.1",
+      "group_id": "review",
+      "coat": "charcoal",
+      "events": ["Finished dependency map", "Prepared next steps", "Ready for a task"],
+      "conversation": [
+        { "role": "assistant", "content": "The dependency map is prepared. I am ready for another task." }
+      ]
+    },
+    {
+      "tool_call_id": "call-ember",
+      "parent_session_id": "hackathon-room-demo",
+      "agent_name": "test",
+      "agent_display_name": "Ember",
+      "task": "Run interaction checks",
+      "state": "cancelled",
+      "started_at": 1721303300,
+      "updated_at": 1721303700,
+      "child_session_id": "child-ember",
+      "current_activity": "Run cancelled after handoff",
+      "turns_used": 5,
+      "usage": { "prompt_tokens": 7380, "completion_tokens": 890 },
+      "estimated_cost_usd": 0.0056,
+      "model": "devstral-2",
+      "group_id": "review",
+      "coat": "sunny",
+      "events": ["Started interaction checks", "Captured desktop state", "Run cancelled after handoff"],
+      "conversation": [
+        { "role": "user", "content": "Run interaction checks." },
+        { "role": "assistant", "content": "Desktop state was captured before the run was handed off." }
+      ]
+    }
+  ]
+}

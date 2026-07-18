@@ -13,6 +13,7 @@ class TestCommandRegistry:
         assert registry.get_command_name("/clear") == "clear"
         assert registry.get_command_name("/exit") == "exit"
         assert registry.get_command_name("/data-retention") == "data-retention"
+        assert registry.get_command_name("/orchestrator") == "orchestrate"
 
     def test_get_command_name_normalizes_input(self) -> None:
         registry = CommandRegistry()
@@ -126,6 +127,15 @@ class TestCommandRegistry:
         _, cmd, cmd_args = result
         assert cmd.handler == "_rename_session"
         assert cmd_args == "Better title"
+
+    def test_orchestrator_command_registration(self) -> None:
+        registry = CommandRegistry()
+        result = registry.parse_command("/orchestrate")
+
+        assert result is not None
+        _, command, command_args = result
+        assert command.handler == "_show_orchestrator"
+        assert command_args == ""
 
     def test_parse_command_keeps_args_for_no_arg_commands(self) -> None:
         registry = CommandRegistry()

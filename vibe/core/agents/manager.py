@@ -169,6 +169,7 @@ class AgentManager:
             name
             for name, agent in self.available_agents.items()
             if agent.agent_type == AgentType.AGENT
+            and name != BuiltinAgentName.ORCHESTRATOR
         ]
         order = [name for name in builtin_order if name in primary_agents]
         custom = sorted(name for name in primary_agents if name not in builtin_order)
@@ -176,5 +177,7 @@ class AgentManager:
 
     def next_agent(self, current: AgentProfile) -> AgentProfile:
         order = self.get_agent_order()
+        if not order:
+            return current
         idx = order.index(current.name) if current.name in order else -1
         return self.available_agents[order[(idx + 1) % len(order)]]

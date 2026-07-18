@@ -6,6 +6,8 @@ from pathlib import Path
 import tomllib
 from typing import TYPE_CHECKING, Any
 
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
 from vibe.core.agents._migration import (
     LEGACY_BASE_DISABLED_KEY,
     migrate_agent_profile_config,
@@ -40,12 +42,65 @@ class AgentType(StrEnum):
 
 class BuiltinAgentName(StrEnum):
     DEFAULT = "default"
+    ORCHESTRATOR = "orchestrator"
     CHAT = "chat"
     PLAN = "plan"
     ACCEPT_EDITS = "accept-edits"
     AUTO_APPROVE = "auto-approve"
     EXPLORE = "explore"
     LEAN = "lean"
+
+
+class ManagedAgentState(StrEnum):
+    STARTING = auto()
+    RUNNING = auto()
+    WORKING = auto()
+    ATTENTION = auto()
+    IDLE = auto()
+    FAILED = auto()
+    STOPPED = auto()
+
+
+class ManagedAgentSnapshot(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    agent_id: str = Field(min_length=1)
+    child_session_id: str = Field(min_length=1)
+    profile: str = Field(min_length=1)
+    state: ManagedAgentState
+    task: str = Field(min_length=1)
+    current_activity: str | None = None
+    last_response: str = Field(default="", max_length=12_000)
+    error: str | None = None
+    queued_messages: int = Field(default=0, ge=0)
+    started_at: float = Field(default=0.0, ge=0)
+    updated_at: float = Field(default=0.0, ge=0)
+    turns_used: int = Field(default=0, ge=0)
+    prompt_tokens: int = Field(default=0, ge=0)
+    completion_tokens: int = Field(default=0, ge=0)
+    context_tokens: int = Field(default=0, ge=0)
+    context_limit: int | None = Field(default=None, ge=1)
+    estimated_cost_usd: float = Field(default=0.0, ge=0)
+    model: str | None = None
+
+    @field_validator(
+        "agent_id",
+        "child_session_id",
+        "profile",
+        "task",
+        "current_activity",
+        "error",
+        "model",
+        mode="before",
+    )
+    @classmethod
+    def trim_nonblank_strings(cls, value: object) -> object:
+        if value is None or not isinstance(value, str):
+            return value
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("value must not be blank")
+        return stripped
 
 
 @dataclass(frozen=True)
@@ -59,7 +114,14 @@ class AgentProfile:
     install_required: bool = False
 
     def apply_to_config(self, base: VibeConfigT) -> VibeConfigT:
-        merged = _deep_merge(base.model_dump(), self.overrides)
+        base_values = base.model_dump()
+        base_values.update({
+            "enable_config_orchestrator": base.enable_config_orchestrator,
+            "enable_orchestrator_controls": base.enable_orchestrator_controls,
+            "enable_cli_control": base.enable_cli_control,
+            "enable_agent_management": base.enable_agent_management,
+        })
+        merged = _deep_merge(base_values, self.overrides)
         profile_disabled_tools = self.overrides.get("disabled_tools")
         if isinstance(profile_disabled_tools, list):
             merged["disabled_tools"] = list(
@@ -103,6 +165,16 @@ DEFAULT = AgentProfile(
     "Requires approval for tool executions",
     AgentSafety.NEUTRAL,
     overrides={"disabled_tools": ["exit_plan_mode"]},
+)
+ORCHESTRATOR = AgentProfile(
+    BuiltinAgentName.ORCHESTRATOR,
+    "Orchestrator",
+    "Coordinates work through explicit permissioned controls when available",
+    AgentSafety.NEUTRAL,
+    overrides={
+        "enable_orchestrator_controls": True,
+        "disabled_tools": ["exit_plan_mode"],
+    },
 )
 PLAN = AgentProfile(
     BuiltinAgentName.PLAN,
@@ -190,6 +262,7 @@ LEAN = AgentProfile(
 
 BUILTIN_AGENTS: dict[str, AgentProfile] = {
     BuiltinAgentName.DEFAULT: DEFAULT,
+    BuiltinAgentName.ORCHESTRATOR: ORCHESTRATOR,
     BuiltinAgentName.PLAN: PLAN,
     BuiltinAgentName.ACCEPT_EDITS: ACCEPT_EDITS,
     BuiltinAgentName.AUTO_APPROVE: AUTO_APPROVE,

@@ -2,9 +2,16 @@ from __future__ import annotations
 
 import pytest
 
-from tests.conftest import build_test_vibe_config
+from tests.conftest import build_test_vibe_config, build_test_vibe_config_schema
 from vibe.core.agents.manager import AgentManager
-from vibe.core.agents.models import BUILTIN_AGENTS, EXPLORE, AgentSafety, AgentType
+from vibe.core.agents.models import (
+    BUILTIN_AGENTS,
+    EXPLORE,
+    ORCHESTRATOR,
+    AgentSafety,
+    AgentType,
+    BuiltinAgentName,
+)
 from vibe.core.config.orchestrator_legacy import LegacyConfigOrchestrator
 
 
@@ -27,6 +34,38 @@ class TestAgentProfile:
         """Test that BUILTIN_AGENTS includes explore."""
         assert "explore" in BUILTIN_AGENTS
         assert BUILTIN_AGENTS["explore"] is EXPLORE
+
+    def test_orchestrator_profile_enables_only_the_profile_gate(self) -> None:
+        config = ORCHESTRATOR.apply_to_config(build_test_vibe_config())
+
+        assert BUILTIN_AGENTS[BuiltinAgentName.ORCHESTRATOR] is ORCHESTRATOR
+        assert config.enable_orchestrator_controls is True
+        assert config.enable_cli_control is False
+        assert config.enable_agent_management is False
+
+    def test_orchestrator_profile_preserves_runtime_capability_gates(self) -> None:
+        base = build_test_vibe_config().model_copy(
+            update={"enable_cli_control": True, "enable_agent_management": True}
+        )
+
+        config = ORCHESTRATOR.apply_to_config(base)
+
+        assert config.enable_cli_control is True
+        assert config.enable_agent_management is True
+
+    @pytest.mark.parametrize(
+        "config_builder", [build_test_vibe_config, build_test_vibe_config_schema]
+    )
+    def test_orchestrator_gates_are_supported_by_both_config_models(
+        self, config_builder
+    ) -> None:
+        base = config_builder(enable_cli_control=True, enable_agent_management=True)
+
+        config = ORCHESTRATOR.apply_to_config(base)
+
+        assert config.enable_orchestrator_controls is True
+        assert config.enable_cli_control is True
+        assert config.enable_agent_management is True
 
 
 class TestAgentManager:
@@ -77,6 +116,32 @@ class TestAgentManager:
 
         assert agent.name == "default"
         assert agent.agent_type == AgentType.AGENT
+
+    def test_orchestrator_can_be_selected_directly(self) -> None:
+        config = build_test_vibe_config()
+        manager = AgentManager(
+            LegacyConfigOrchestrator(config),
+            initial_agent=BuiltinAgentName.ORCHESTRATOR,
+        )
+
+        assert manager.active_profile is ORCHESTRATOR
+        assert manager.get_agent(BuiltinAgentName.ORCHESTRATOR) is ORCHESTRATOR
+
+    def test_orchestrator_is_excluded_from_cycle_order(
+        self, manager: AgentManager
+    ) -> None:
+        assert BuiltinAgentName.ORCHESTRATOR in manager.available_agents
+        assert BuiltinAgentName.ORCHESTRATOR not in manager.get_agent_order()
+
+    def test_cycle_returns_current_when_only_orchestrator_is_available(self) -> None:
+        config = build_test_vibe_config(enabled_agents=[BuiltinAgentName.ORCHESTRATOR])
+        manager = AgentManager(
+            LegacyConfigOrchestrator(config),
+            initial_agent=BuiltinAgentName.ORCHESTRATOR,
+        )
+
+        assert manager.get_agent_order() == []
+        assert manager.next_agent(manager.active_profile) is ORCHESTRATOR
 
     def test_initial_agent_rejects_subagent(self) -> None:
         """Test that creating AgentManager with a subagent as initial_agent raises."""

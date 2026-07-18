@@ -24,12 +24,12 @@ from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, VerticalGroup, VerticalScroll
 from textual.dom import NoScreen
 from textual.driver import Driver
-from textual.events import AppBlur, AppFocus, MouseUp
+from textual.events import AppBlur, AppFocus, Key, MouseUp, Resize
 from textual.screen import Screen
 from textual.theme import BUILTIN_THEMES
 from textual.timer import Timer
 from textual.widget import Widget
-from textual.widgets import Static
+from textual.widgets import ContentSwitcher, Static
 from textual.worker import Worker, WorkerFailed, WorkerState
 
 from vibe import __version__ as CORE_VERSION
@@ -153,6 +153,32 @@ from vibe.cli.textual_ui.windowing import (
     sync_backfill_state,
 )
 from vibe.cli.textual_ui.word_selection import WordSelectScreen
+from vibe.cli.textual_ui.workspace import (
+    AgentActivitySnapshot,
+    AgentActivityStore,
+    AgentRunState,
+    WorkspaceView,
+)
+from vibe.cli.textual_ui.workspace.cli_control import TextualCLIControl
+from vibe.cli.textual_ui.workspace.coworkers import CoworkersPage, CoworkersViewModel
+from vibe.cli.textual_ui.workspace.navigation import WorkspaceNavigation
+from vibe.cli.textual_ui.workspace.pages import (
+    AgentsPage,
+    AgentsViewModel,
+    ChatPage,
+    HomePage,
+    HomeViewModel,
+    MCPPage,
+    OfficePage,
+    OfficeViewModel,
+    UsagePage,
+    UsageViewModel,
+)
+from vibe.cli.textual_ui.workspace.team_presenter import (
+    coworkers_view,
+    team_activity_snapshot,
+    team_sync_summary,
+)
 from vibe.cli.update_notifier import (
     PyPIUpdateGateway,
     UpdateCacheRepository,
@@ -171,7 +197,16 @@ from vibe.cli.vscode_extension_promo import (
     VscodeExtensionPromoState,
     should_show_promo,
 )
-from vibe.core.agents import AgentProfile
+from vibe.core.agents import (
+    AgentProfile,
+    AgentType,
+    BuiltinAgentName,
+    ManagedAgentState,
+)
+from vibe.core.agents.events import (
+    ManagedAgentLifecycleEvent,
+    get_managed_agent_callback_context,
+)
 from vibe.core.autocompletion.path_prompt import (
     PathPromptPayload,
     PathResource,
@@ -181,6 +216,11 @@ from vibe.core.autocompletion.path_prompt import (
 from vibe.core.autocompletion.path_prompt_adapter import extract_image_resources
 from vibe.core.config import DEFAULT_THEME, AnyVibeConfig, ModelConfig
 from vibe.core.config.patch import escape_json_pointer_token
+from vibe.core.control_port import (
+    CLICommandRequest,
+    CLINavigateWorkspaceRequest,
+    CLISwitchAgentRequest,
+)
 from vibe.core.data_retention import DATA_RETENTION_MESSAGE
 from vibe.core.hooks.models import HookStartEvent
 from vibe.core.log_reader import LogReader
@@ -201,6 +241,16 @@ from vibe.core.session.saved_sessions import (
 )
 from vibe.core.session.session_loader import SessionLoader
 from vibe.core.session.title_format import format_session_title
+from vibe.core.team_workspace import (
+    ActivityState,
+    ActivitySummary,
+    ConversationRole,
+    HistoryScope,
+    PrivacyMode,
+    TeamWorkspaceService,
+    TeamWorkspaceSnapshot,
+    build_team_workspace_service,
+)
 from vibe.core.telemetry.types import (
     ProjectPickerTelemetryPayload,
     ProjectSelectionSource,
@@ -246,7 +296,9 @@ from vibe.core.types import (
     RefusalError,
     ResponseTooLongError,
     Role,
+    SubagentLifecycleEvent,
     ToolCallEvent,
+    ToolResultEvent,
     ToolStreamEvent,
     WaitingForInputEvent,
 )
@@ -323,7 +375,6 @@ class BottomApp(StrEnum):
     Config = auto()
     ConnectorAuth = auto()
     Input = auto()
-    MCP = auto()
     MCPOAuth = auto()
     ModelPicker = auto()
     ProxySetup = auto()
@@ -392,6 +443,9 @@ PRUNE_LOW_MARK = 1000
 PRUNE_HIGH_MARK = 1500
 DOUBLE_ESC_DELAY = 0.2
 MODE_SWITCH_SPINNER_DELAY = 0.5
+WORKSPACE_WIDE_BREAKPOINT = 110
+WORKSPACE_MEDIUM_BREAKPOINT = 82
+SHARED_CONVERSATION_INPUT_CHARS = 2_000
 
 _DEFAULT_TYPING_DEBOUNCE_MS = 1000
 _TYPING_DEBOUNCE_ENV_VAR = "VIBE_TYPING_GRACE_PERIOD_MS"
@@ -474,7 +528,6 @@ class VibeApp(App):  # noqa: PLR0904
         Binding("ctrl+o", "toggle_tool", "Toggle Tool", show=False),
         Binding("ctrl+y", "copy_selection", "Copy", show=False, priority=True),
         Binding("ctrl+shift+c", "copy_selection", "Copy", show=False, priority=True),
-        Binding("shift+tab", "cycle_mode", "Cycle Mode", show=False, priority=True),
         Binding("shift+up", "scroll_chat_up", "Scroll Up", show=False, priority=True),
         Binding(
             "shift+down", "scroll_chat_down", "Scroll Down", show=False, priority=True
@@ -483,6 +536,13 @@ class VibeApp(App):  # noqa: PLR0904
             "ctrl+g", "open_plan_in_editor", "Edit Plan", show=False, priority=False
         ),
         Binding("ctrl+backslash", "toggle_debug_console", "Debug Console", show=False),
+        Binding("ctrl+1", "show_workspace('home')", "Home"),
+        Binding("ctrl+2", "show_workspace('chat')", "Chat"),
+        Binding("ctrl+3", "show_workspace('office')", "Office"),
+        Binding("ctrl+4", "show_workspace('agents')", "Agents"),
+        Binding("ctrl+5", "show_workspace('mcp')", "MCP Manager"),
+        Binding("ctrl+6", "show_workspace('usage')", "Usage"),
+        Binding("ctrl+7", "show_workspace('coworkers')", "Coworkers"),
     ]
 
     def get_driver_class(self) -> type[Driver]:
@@ -507,6 +567,10 @@ class VibeApp(App):  # noqa: PLR0904
         vscode_extension_promo: VscodeExtensionPromo | None = None,
         **kwargs: Any,
     ) -> None:
+        team_workspace_service = cast(
+            TeamWorkspaceService | None,
+            kwargs.pop("team_workspace_service", None),
+        )
         super().__init__(**kwargs)
         self.agent_loop = agent_loop
         self._plan_info: PlanInfo | None = None
@@ -555,7 +619,8 @@ class VibeApp(App):  # noqa: PLR0904
             and _is_vscode_family_terminal()
             and should_show_promo(vscode_extension_promo.initial_state)
         )
-        self._configure_startup_options(startup)
+        self._configure_team_workspace_integration(team_workspace_service)
+        self._configure_startup_workspace(startup)
         self._last_escape_time: float | None = None
         self._quit_manager = QuitManager(self)
         self._banner: Banner | None = None
@@ -576,6 +641,7 @@ class VibeApp(App):  # noqa: PLR0904
         self._fatal_init_error = False
         self._force_quit_task: asyncio.Task[None] | None = None
         self.commands = self._build_command_registry()
+        self._configure_cli_control()
         self._loop_runner = ScheduledLoopRunner(
             self.agent_loop.session_logger,
             can_fire=lambda: (
@@ -596,6 +662,23 @@ class VibeApp(App):  # noqa: PLR0904
         self._is_resuming_session = opts.is_resuming_session
         self._startup_prompt_processed = False
         self._startup_command_availability_ready = asyncio.Event()
+
+    def _configure_startup_workspace(self, startup: StartupOptions | None) -> None:
+        self._configure_startup_options(startup)
+        self._pending_mcp_source = ""
+        self._workspace_view = self._initial_workspace_view()
+        self._activity_store = AgentActivityStore(self.agent_loop.session_id)
+        self._set_primary_activity(AgentRunState.IDLE)
+
+    def _initial_workspace_view(self) -> WorkspaceView:
+        if (
+            self._initial_prompt
+            or self._teleport_on_start
+            or self._show_resume_picker
+            or self._is_resuming_session
+        ):
+            return WorkspaceView.CHAT
+        return WorkspaceView.HOME
 
     @property
     def config(self) -> AnyVibeConfig:
@@ -656,10 +739,27 @@ class VibeApp(App):  # noqa: PLR0904
 
     async def _handle_injected_context_event(self, event: BaseEvent) -> None:
         self._narrator_manager.on_turn_event(event)
+        session_changed = self._observe_public_event(event)
+        if session_changed:
+            await self._restart_managed_agent_events()
         if self.event_handler:
             await self.event_handler.handle_event(
                 event, loading_widget=self._loading_widget
             )
+
+    def _observe_public_event(self, event: BaseEvent) -> bool:
+        session_changed = self._sync_activity_store_session()
+        self._activity_store.apply(event)
+        if isinstance(
+            event, (SubagentLifecycleEvent, ToolCallEvent, ToolResultEvent)
+        ) and event.tool_name == "task":
+            self._publish_local_task_activity(event.tool_call_id)
+        if isinstance(event, WaitingForInputEvent):
+            self._set_primary_activity(AgentRunState.ATTENTION, "Waiting for input")
+            self._show_workspace(WorkspaceView.CHAT)
+        elif is_progress_event(event) or isinstance(event, ToolResultEvent):
+            self._set_primary_activity(AgentRunState.WORKING, "Working")
+        return session_changed
 
     def _maybe_show_feedback_bar(self) -> None:
         if self._feedback_bar_manager.should_show(self.agent_loop):
@@ -706,6 +806,68 @@ class VibeApp(App):  # noqa: PLR0904
         context = self._command_context()
         return CommandRegistry(vibe_code_enabled=context.vibe_code_enabled)
 
+    def _configure_team_workspace_integration(
+        self, service: TeamWorkspaceService | None
+    ) -> None:
+        self._team_workspace_service = service
+        self._team_workspace_configured = (
+            service is not None or self.config.team_workspace.enabled
+        )
+        self._team_workspace_start_task: asyncio.Task[None] | None = None
+        self._team_workspace_publish_tasks: set[
+            asyncio.Task[TeamWorkspaceSnapshot]
+        ] = set()
+        if service is None:
+            return
+        service.add_listener(self._refresh_team_workspace_pages)
+
+    def _configure_cli_control(self) -> None:
+        self._cli_control = TextualCLIControl(
+            command_registry=self.commands,
+            resolve_primary_profile=self._resolve_primary_agent_profile,
+        )
+        self._managed_agent_events_task: asyncio.Task[None] | None = None
+        self._managed_agent_events_generation = 0
+        self._install_interactive_ports()
+
+    def _install_interactive_ports(self) -> None:
+        self.agent_loop.enable_interactive_surface_capabilities()
+        self.agent_loop.set_cli_control_port(self._cli_control)
+
+    def _build_team_workspace_service(self) -> TeamWorkspaceService:
+        settings = self.config.team_workspace
+        shared_root = Path(settings.shared_root) if settings.shared_root else None
+        project_root = (
+            Path(self.config.displayed_workdir)
+            if self.config.displayed_workdir
+            else Path.cwd()
+        )
+        return build_team_workspace_service(
+            enabled=settings.enabled,
+            shared_root=shared_root,
+            project_root=project_root,
+            member_name=settings.member_name,
+            privacy_mode=PrivacyMode(settings.privacy_mode),
+            history_scope=HistoryScope(settings.history_scope),
+            history_limit=settings.history_limit,
+            heartbeat_interval_seconds=settings.heartbeat_interval_seconds,
+            presence_ttl_seconds=settings.presence_ttl_seconds,
+        )
+
+    def _resolve_primary_agent_profile(self, name: str) -> str | None:
+        normalized = name.casefold()
+        profile = next(
+            (
+                item
+                for item in self.agent_loop.agent_manager.available_agents.values()
+                if item.name.casefold() == normalized
+            ),
+            None,
+        )
+        if profile is None or profile.agent_type is not AgentType.AGENT:
+            return None
+        return profile.name
+
     def _command_context(self) -> CommandContext:
         return CommandContext(
             vibe_code_enabled=self.agent_loop.base_config.vibe_code_enabled
@@ -716,6 +878,7 @@ class VibeApp(App):  # noqa: PLR0904
 
     async def _refresh_config_from_disk(self) -> None:
         await self.agent_loop.refresh_config()
+        self._install_interactive_ports()
         self._narrator_manager.sync()
         self._refresh_command_registry()
 
@@ -723,31 +886,30 @@ class VibeApp(App):  # noqa: PLR0904
         return WordSelectScreen(id="_default")
 
     def compose(self) -> ComposeResult:
-        with ChatScroll(id="chat"):
-            connectors_connected, connectors_total = compute_connector_counts(
-                self.config, self.agent_loop.connector_registry
-            )
-            self._banner = Banner(
-                config=self.config,
-                skill_manager=self.agent_loop.skill_manager,
-                connectors_connected=connectors_connected,
-                connectors_total=connectors_total,
-                hooks_count=self.agent_loop.hooks_count,
-            )
-            yield self._banner
-            yield VerticalGroup(id="messages")
+        connectors_connected, connectors_total = compute_connector_counts(
+            self.config, self.agent_loop.connector_registry
+        )
+        self._banner = Banner(
+            config=self.config,
+            skill_manager=self.agent_loop.skill_manager,
+            connectors_connected=connectors_connected,
+            connectors_total=connectors_total,
+            hooks_count=self.agent_loop.hooks_count,
+        )
+        chat = ChatScroll(self._banner, VerticalGroup(id="messages"), id="chat")
 
-        with Horizontal(id="loading-area"):
-            yield NarratorStatus(self._narrator_manager)
-            yield Static(id="loading-area-content")
-            self._clipboard_notice = NonSelectableStatic(id="clipboard-notice")
-            self._clipboard_notice.display = False
-            self._clipboard_hide_timer: Timer | None = None
-            yield self._clipboard_notice
-            yield FeedbackBar()
-
-        with Static(id="bottom-app-container"):
-            yield ChatInputContainer(
+        self._clipboard_notice = NonSelectableStatic(id="clipboard-notice")
+        self._clipboard_notice.display = False
+        self._clipboard_hide_timer: Timer | None = None
+        loading_area = Horizontal(
+            NarratorStatus(self._narrator_manager),
+            Static(id="loading-area-content"),
+            self._clipboard_notice,
+            FeedbackBar(),
+            id="loading-area",
+        )
+        bottom_app = VerticalGroup(
+            ChatInputContainer(
                 history_file=self.history_file,
                 command_registry=self.commands,
                 id="input-container",
@@ -756,12 +918,511 @@ class VibeApp(App):  # noqa: PLR0904
                 skill_entries_getter=self._get_skill_entries,
                 file_watcher_for_autocomplete_getter=self._is_file_watcher_enabled,
                 voice_manager=self._voice_manager,
-            )
+                disabled=self._workspace_view is not WorkspaceView.CHAT,
+            ),
+            id="bottom-app-container",
+        )
+        bottom_bar = Horizontal(
+            PathDisplay(self.config.displayed_workdir or Path.cwd()),
+            NoMarkupStatic(id="spacer"),
+            ContextProgress(),
+            id="bottom-bar",
+        )
+        chat_content = VerticalGroup(
+            chat, loading_area, bottom_app, bottom_bar, id="workspace-chat-content"
+        )
 
-        with Horizontal(id="bottom-bar"):
-            yield PathDisplay(self.config.displayed_workdir or Path.cwd())
-            yield NoMarkupStatic(id="spacer")
-            yield ContextProgress()
+        connector_registry = (
+            self.agent_loop.connector_registry if self._connectors_enabled else None
+        )
+        mcp_app = _get_mcp_app_class()(
+            mcp_servers=self.config.mcp_servers,
+            tool_manager=self.agent_loop.tool_manager,
+            connector_registry=connector_registry,
+            mcp_registry=self.agent_loop.mcp_registry,
+            get_vibe_config=lambda: self.agent_loop.config,
+            refresh_callback=self._refresh_mcp_browser,
+            initial_server=self._pending_mcp_source,
+        )
+        snapshot = self._workspace_activity_snapshot()
+        initial_page = self._workspace_page_id(self._workspace_view)
+        with Horizontal(id="workspace-shell"):
+            yield WorkspaceNavigation(self._workspace_view)
+            with ContentSwitcher(id="workspace-content", initial=initial_page):
+                yield HomePage(
+                    self._home_view_model(snapshot),
+                    id=self._workspace_page_id(WorkspaceView.HOME),
+                )
+                yield ChatPage(
+                    chat_content, id=self._workspace_page_id(WorkspaceView.CHAT)
+                )
+                yield OfficePage(
+                    self._office_view_model(snapshot),
+                    id=self._workspace_page_id(WorkspaceView.OFFICE),
+                )
+                yield AgentsPage(
+                    self._agents_view_model(),
+                    id=self._workspace_page_id(WorkspaceView.AGENTS),
+                )
+                yield MCPPage(mcp_app, id=self._workspace_page_id(WorkspaceView.MCP))
+                yield UsagePage(
+                    UsageViewModel.from_stats(self.agent_loop.stats),
+                    id=self._workspace_page_id(WorkspaceView.USAGE),
+                )
+                yield CoworkersPage(
+                    self._coworkers_view_model(),
+                    id=self._workspace_page_id(WorkspaceView.COWORKERS),
+                )
+
+    @staticmethod
+    def _workspace_page_id(view: WorkspaceView) -> str:
+        return f"workspace-{view.value}"
+
+    def _workspace_system_summary(self) -> str:
+        if self._fatal_init_error:
+            return "System unavailable"
+        if not self.agent_loop.is_initialized:
+            return "System initializing"
+        connector_registry = self.agent_loop.connector_registry
+        connector_count = (
+            connector_registry.connector_count if connector_registry else 0
+        )
+        source_count = len(self.config.mcp_servers) + connector_count
+        if source_count == 0:
+            return "System ready"
+        noun = "source" if source_count == 1 else "sources"
+        return f"System ready · {source_count} MCP {noun}"
+
+    def _workspace_activity_snapshot(self) -> AgentActivitySnapshot:
+        service = self._team_workspace_service
+        if service is not None and service.enabled:
+            return team_activity_snapshot(service.snapshot)
+        return self._activity_store.snapshot
+
+    def _home_view_model(
+        self, snapshot: AgentActivitySnapshot | None = None
+    ) -> HomeViewModel:
+        service = self._team_workspace_service
+        return HomeViewModel(
+            snapshot or self._workspace_activity_snapshot(),
+            self._workspace_system_summary(),
+            team_sync_summary(service.snapshot)
+            if service is not None and service.enabled
+            else None,
+        )
+
+    def _office_view_model(
+        self, snapshot: AgentActivitySnapshot | None = None
+    ) -> OfficeViewModel:
+        service = self._team_workspace_service
+        return OfficeViewModel(
+            snapshot or self._workspace_activity_snapshot(),
+            service.snapshot.identity.display_name
+            if service is not None and service.enabled
+            else None,
+        )
+
+    def _coworkers_view_model(self) -> CoworkersViewModel:
+        service = self._team_workspace_service
+        if service is not None:
+            return coworkers_view(service.snapshot)
+        if self._team_workspace_configured:
+            return CoworkersViewModel(
+                workspace_name="Team workspace",
+                connection_state="connecting",
+                privacy_label=self.config.team_workspace.privacy_mode,
+            )
+        return CoworkersViewModel(
+            join_hint="vibe team join <team-repo-url>",
+        )
+
+    async def _start_team_workspace(self) -> None:
+        try:
+            service = self._team_workspace_service
+            if service is None:
+                service = await asyncio.to_thread(self._build_team_workspace_service)
+                self._team_workspace_service = service
+                service.add_listener(self._refresh_team_workspace_pages)
+            if not service.enabled:
+                self._refresh_workspace_pages()
+                return
+
+            await service.start()
+            profile = self.agent_loop.agent_profile
+            state = (
+                AgentRunState.WORKING
+                if self._agent_running
+                else AgentRunState.IDLE
+            )
+            await service.publish_activity(
+                local_run_id=f"primary:{self.agent_loop.session_id}",
+                agent_name=profile.name,
+                agent_display_name=profile.display_name,
+                state=ActivityState(state.value),
+                summary=self._team_activity_summary(state),
+            )
+            self._refresh_team_workspace_pages(service.snapshot)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            logger.error("Failed to start team workspace", exc_info=error)
+            self._refresh_workspace_pages()
+
+    async def _stop_team_workspace(self) -> None:
+        start_task = self._team_workspace_start_task
+        self._team_workspace_start_task = None
+        if start_task is not None and not start_task.done():
+            start_task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await start_task
+
+        publish_tasks = tuple(self._team_workspace_publish_tasks)
+        self._team_workspace_publish_tasks.clear()
+        for task in publish_tasks:
+            if not task.done():
+                task.cancel()
+        for task in publish_tasks:
+            if task.done():
+                continue
+            with suppress(asyncio.CancelledError, Exception):
+                await task
+
+        service = self._team_workspace_service
+        if service is None:
+            return
+        service.remove_listener(self._refresh_team_workspace_pages)
+        with suppress(TimeoutError):
+            await asyncio.wait_for(service.stop(), timeout=3.0)
+
+    def _agents_view_model(self) -> AgentsViewModel:
+        profiles = tuple(self.agent_loop.agent_manager.available_agents.values())
+        return AgentsViewModel.from_profiles(profiles)
+
+    @staticmethod
+    def _team_activity_summary(
+        state: AgentRunState, current_activity: str | None = None
+    ) -> ActivitySummary | None:
+        match state:
+            case AgentRunState.REQUESTED | AgentRunState.RUNNING:
+                summary = ActivitySummary.STARTING
+            case AgentRunState.WORKING:
+                if current_activity and "tool" in current_activity.casefold():
+                    summary = ActivitySummary.USING_TOOL
+                else:
+                    summary = ActivitySummary.THINKING
+            case AgentRunState.ATTENTION:
+                if current_activity and "approval" in current_activity.casefold():
+                    summary = ActivitySummary.WAITING_FOR_APPROVAL
+                else:
+                    summary = ActivitySummary.WAITING_FOR_INPUT
+            case AgentRunState.FAILED:
+                summary = ActivitySummary.FAILED
+            case AgentRunState.COMPLETED:
+                summary = ActivitySummary.FINISHED
+            case AgentRunState.CANCELLED | AgentRunState.STOPPED:
+                summary = ActivitySummary.CANCELLED
+            case AgentRunState.IDLE:
+                summary = None
+        return summary
+
+    def _schedule_team_activity(
+        self,
+        *,
+        local_run_id: str,
+        agent_name: str,
+        agent_display_name: str,
+        state: AgentRunState,
+        current_activity: str | None = None,
+    ) -> None:
+        service = self._team_workspace_service
+        if service is None or not service.enabled or not agent_name:
+            return
+        task = asyncio.create_task(
+            service.publish_activity(
+                local_run_id=local_run_id,
+                agent_name=agent_name,
+                agent_display_name=agent_display_name or agent_name,
+                state=ActivityState(state.value),
+                summary=self._team_activity_summary(state, current_activity),
+            ),
+            name=f"team-activity-{local_run_id}",
+        )
+        self._team_workspace_publish_tasks.add(task)
+        task.add_done_callback(self._team_workspace_publish_done)
+
+    def _team_workspace_publish_done(
+        self, task: asyncio.Task[TeamWorkspaceSnapshot]
+    ) -> None:
+        self._team_workspace_publish_tasks.discard(task)
+        if task.cancelled():
+            return
+        if error := task.exception():
+            logger.error("Failed to publish team activity", exc_info=error)
+
+    def _schedule_team_conversation(
+        self, role: ConversationRole, text: str
+    ) -> None:
+        service = self._team_workspace_service
+        if service is None or not service.enabled or not text:
+            return
+        task = asyncio.create_task(
+            service.publish_conversation(
+                local_run_id=f"primary:{self.agent_loop.session_id}",
+                role=role,
+                text=text[:SHARED_CONVERSATION_INPUT_CHARS],
+            ),
+            name=f"team-conversation-{role.value}",
+        )
+        self._team_workspace_publish_tasks.add(task)
+        task.add_done_callback(self._team_workspace_publish_done)
+
+    def _publish_local_task_activity(self, tool_call_id: str) -> None:
+        activity = next(
+            (
+                item
+                for item in self._activity_store.snapshot.activities
+                if item.tool_call_id == tool_call_id
+            ),
+            None,
+        )
+        if activity is None or activity.is_primary:
+            return
+        self._schedule_team_activity(
+            local_run_id=activity.tool_call_id,
+            agent_name=activity.agent_name,
+            agent_display_name=activity.agent_display_name,
+            state=activity.state,
+            current_activity=activity.current_activity,
+        )
+
+    async def _consume_managed_agent_events(self, generation: int) -> None:
+        try:
+            async with aclosing(self.agent_loop.managed_agent_events()) as events:
+                async for event in events:
+                    if generation != self._managed_agent_events_generation:
+                        return
+                    self._observe_public_event(event)
+                    self._on_managed_agent_lifecycle(event)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            logger.error("Managed agent event consumer failed", exc_info=error)
+
+    async def _restart_managed_agent_events(self) -> None:
+        await self._stop_managed_agent_events()
+        self._managed_agent_events_generation += 1
+        generation = self._managed_agent_events_generation
+        self._managed_agent_events_task = asyncio.create_task(
+            self._consume_managed_agent_events(generation),
+            name="managed-agent-events",
+        )
+
+    async def _stop_managed_agent_events(self) -> None:
+        task = self._managed_agent_events_task
+        self._managed_agent_events_task = None
+        self._managed_agent_events_generation += 1
+        if task is None or task.done():
+            return
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+    def _on_managed_agent_lifecycle(
+        self, event: ManagedAgentLifecycleEvent
+    ) -> None:
+        match event.state:
+            case ManagedAgentState.STARTING:
+                state = AgentRunState.REQUESTED
+            case ManagedAgentState.RUNNING:
+                state = AgentRunState.RUNNING
+            case ManagedAgentState.WORKING:
+                state = AgentRunState.WORKING
+            case ManagedAgentState.ATTENTION:
+                state = AgentRunState.ATTENTION
+            case ManagedAgentState.IDLE:
+                state = AgentRunState.IDLE
+            case ManagedAgentState.FAILED:
+                state = AgentRunState.FAILED
+            case ManagedAgentState.STOPPED:
+                state = AgentRunState.CANCELLED
+        profile = self.agent_loop.agent_manager.available_agents.get(event.profile)
+        self._schedule_team_activity(
+            local_run_id=f"managed:{event.child_session_id}",
+            agent_name=event.profile,
+            agent_display_name=profile.display_name if profile else event.profile,
+            state=state,
+            current_activity=event.current_activity,
+        )
+
+    def _set_primary_activity(
+        self, state: AgentRunState, current_activity: str | None = None
+    ) -> None:
+        self._sync_activity_store_session()
+        profile = self.agent_loop.agent_profile
+        self._activity_store.update_primary(
+            profile.name, profile.display_name, state, current_activity
+        )
+        self._schedule_team_activity(
+            local_run_id=f"primary:{self.agent_loop.session_id}",
+            agent_name=profile.name,
+            agent_display_name=profile.display_name,
+            state=state,
+            current_activity=current_activity,
+        )
+
+    def _refresh_activity_pages(self, snapshot: AgentActivitySnapshot) -> None:
+        if not self.screen_stack:
+            return
+        workspace_snapshot = (
+            self._workspace_activity_snapshot()
+            if self._team_workspace_service is not None
+            and self._team_workspace_service.enabled
+            else snapshot
+        )
+        self.query_one(HomePage).update_view(
+            self._home_view_model(workspace_snapshot)
+        )
+        self.query_one(OfficePage).update_view(
+            self._office_view_model(workspace_snapshot)
+        )
+
+    def _refresh_team_workspace_pages(
+        self, snapshot: TeamWorkspaceSnapshot
+    ) -> None:
+        if not self.screen_stack:
+            return
+        activity_snapshot = team_activity_snapshot(snapshot)
+        self.query_one(HomePage).update_view(
+            HomeViewModel(
+                activity_snapshot,
+                self._workspace_system_summary(),
+                team_sync_summary(snapshot),
+            )
+        )
+        self.query_one(OfficePage).update_view(
+            OfficeViewModel(activity_snapshot, snapshot.identity.display_name)
+        )
+        self.query_one(CoworkersPage).update_view(coworkers_view(snapshot))
+
+    def _refresh_workspace_pages(self) -> None:
+        if not self.screen_stack:
+            return
+        self._refresh_activity_pages(self._activity_store.snapshot)
+        self.query_one(AgentsPage).update_view(self._agents_view_model())
+        self.query_one(CoworkersPage).update_view(self._coworkers_view_model())
+        self.query_one(UsagePage).update_view(
+            UsageViewModel.from_stats(self.agent_loop.stats)
+        )
+
+    def _sync_activity_store_session(self) -> bool:
+        if self._activity_store.snapshot.session_id == self.agent_loop.session_id:
+            return False
+        self._reset_activity_store()
+        return True
+
+    def _reset_activity_store(self) -> None:
+        self._activity_store.remove_listener(self._refresh_activity_pages)
+        self._activity_store = AgentActivityStore(self.agent_loop.session_id)
+        state = AgentRunState.WORKING if self._agent_running else AgentRunState.IDLE
+        profile = self.agent_loop.agent_profile
+        self._activity_store.update_primary(
+            profile.name,
+            profile.display_name,
+            state,
+            "Working" if self._agent_running else None,
+        )
+        if self.screen_stack:
+            self._activity_store.add_listener(self._refresh_activity_pages)
+        self._refresh_workspace_pages()
+
+    def _required_interaction_pending(self) -> bool:
+        return (
+            self._current_bottom_app in {BottomApp.Approval, BottomApp.Question}
+            or (
+                self._pending_approval is not None and not self._pending_approval.done()
+            )
+            or (
+                self._pending_question is not None and not self._pending_question.done()
+            )
+        )
+
+    def _show_workspace(self, view: WorkspaceView, *, focus: bool = True) -> None:
+        if self._required_interaction_pending() and view is not WorkspaceView.CHAT:
+            view = WorkspaceView.CHAT
+        self._workspace_view = view
+        if not self.screen_stack:
+            return
+        self.query_one(ContentSwitcher).current = self._workspace_page_id(view)
+        self.query_one(WorkspaceNavigation).select_view(view)
+        self.query_one(_get_mcp_app_class()).set_refresh_active(
+            view is WorkspaceView.MCP
+        )
+        if self._chat_input_container and self._current_bottom_app is BottomApp.Input:
+            self._chat_input_container.disabled = view is not WorkspaceView.CHAT
+        if view in {WorkspaceView.HOME, WorkspaceView.OFFICE}:
+            self._refresh_activity_pages(self._workspace_activity_snapshot())
+        elif view is WorkspaceView.AGENTS:
+            self.query_one(AgentsPage).update_view(self._agents_view_model())
+        elif view is WorkspaceView.COWORKERS:
+            self.query_one(CoworkersPage).update_view(
+                self._coworkers_view_model()
+            )
+        elif view is WorkspaceView.USAGE:
+            self.query_one(UsagePage).update_view(
+                UsageViewModel.from_stats(self.agent_loop.stats)
+            )
+        if focus:
+            self.call_after_refresh(self._focus_workspace_view)
+
+    def _focus_workspace_view(self) -> None:
+        match self._workspace_view:
+            case WorkspaceView.CHAT:
+                self._focus_current_bottom_app()
+            case WorkspaceView.AGENTS:
+                self.query_one(AgentsPage).query_one("#agents-list").focus()
+            case WorkspaceView.COWORKERS:
+                self.query_one(CoworkersPage).focus_roster()
+            case WorkspaceView.MCP:
+                self.query_one(MCPPage).query_one("#mcp-options").focus()
+            case _:
+                self.query_one(WorkspaceNavigation).focus()
+
+    def action_show_workspace(self, view: str) -> None:
+        self._show_workspace(WorkspaceView(view))
+
+    def on_resize(self, event: Resize) -> None:
+        if not self.screen_stack:
+            return
+        self._set_workspace_layout(event.size.width)
+
+    def _set_workspace_layout(self, width: int) -> None:
+        shell = self.query_one("#workspace-shell")
+        shell.remove_class("wide", "medium", "narrow")
+        if width >= WORKSPACE_WIDE_BREAKPOINT:
+            shell.add_class("wide")
+        elif width >= WORKSPACE_MEDIUM_BREAKPOINT:
+            shell.add_class("medium")
+        else:
+            shell.add_class("narrow")
+
+    def on_workspace_navigation_view_selected(
+        self, message: WorkspaceNavigation.ViewSelected
+    ) -> None:
+        self._show_workspace(message.view)
+
+    def on_agents_page_agent_selected(self, message: AgentsPage.AgentSelected) -> None:
+        if message.profile.agent_type != AgentType.AGENT.value:
+            return
+        self._request_agent(message.profile.name)
+
+    def on_home_page_attention_selected(
+        self, message: HomePage.AttentionSelected
+    ) -> None:
+        if self._required_interaction_pending() or not message.activity.is_managed:
+            self._show_workspace(WorkspaceView.CHAT)
+            return
+        self._show_workspace(WorkspaceView.OFFICE)
+        self.query_one(OfficePage).inspect(message.activity)
 
     @property
     def _messages_area(self) -> Widget:
@@ -783,6 +1444,7 @@ class VibeApp(App):  # noqa: PLR0904
 
     async def on_mount(self) -> None:
         self._apply_theme(self.config.theme)
+        self._set_workspace_layout(self.size.width)
         self._terminal_notifier.restore()
         self._feedback_bar = self.query_one(FeedbackBar)
         self._feedback_bar_manager = FeedbackBarManager()
@@ -793,6 +1455,14 @@ class VibeApp(App):  # noqa: PLR0904
             on_profile_changed=self._on_profile_changed,
             on_context_cleared=self._on_context_cleared,
         )
+        self._activity_store.add_listener(self._refresh_activity_pages)
+        if self._team_workspace_configured and (
+            self._team_workspace_service is None
+            or self._team_workspace_service.enabled
+        ):
+            self._team_workspace_start_task = asyncio.create_task(
+                self._start_team_workspace(), name="team-workspace-start"
+            )
 
         self._chat_input_container = self.query_one(ChatInputContainer)
         context_progress = self.query_one(ContextProgress)
@@ -808,10 +1478,11 @@ class VibeApp(App):  # noqa: PLR0904
 
         self.agent_loop.set_approval_callback(self._approval_callback)
         self.agent_loop.set_user_input_callback(self._user_input_callback)
+        await self._restart_managed_agent_events()
         self._refresh_profile_widgets()
 
-        chat_input_container = self.query_one(ChatInputContainer)
-        chat_input_container.focus_input()
+        self.call_after_refresh(self._focus_workspace_view)
+        self._refresh_workspace_pages()
         await self._show_dangerous_directory_warning()
         self.run_worker(self._deferred_resume_and_start(), exclusive=False)
 
@@ -826,6 +1497,9 @@ class VibeApp(App):  # noqa: PLR0904
 
         gc.collect()
         gc.freeze()
+
+    async def on_ready(self) -> None:
+        self._focus_workspace_view()
 
     def _start_post_ready_startup(self) -> None:
         self.run_worker(self._complete_post_ready_startup(), exclusive=False)
@@ -883,6 +1557,7 @@ class VibeApp(App):  # noqa: PLR0904
                 )
             await self._show_mcp_auth_required_notice()
         except Exception as e:
+            self._show_workspace(WorkspaceView.CHAT)
             await self._mount_and_scroll(
                 ErrorMessage(
                     f"Background initialization failed: {e}",
@@ -900,6 +1575,7 @@ class VibeApp(App):  # noqa: PLR0904
             if self._loading_widget is init_widget:
                 await self._remove_loading_widget()
             self._refresh_banner()
+            self._refresh_workspace_pages()
             try:
                 self.query_one(_get_mcp_app_class()).refresh_index()
             except Exception:
@@ -948,9 +1624,17 @@ class VibeApp(App):  # noqa: PLR0904
     def _is_file_watcher_enabled(self) -> bool:
         return self.config.file_watcher_for_autocomplete
 
-    def on_key(self) -> None:
+    def on_key(self, event: Key) -> None:
         if self._fatal_init_error:
             self.exit()
+            return
+        if self._workspace_view is WorkspaceView.CHAT:
+            return
+        if event.character is None or event.character not in "1234567":
+            return
+        event.stop()
+        event.prevent_default()
+        self._show_workspace(tuple(WorkspaceView)[int(event.character) - 1])
 
     async def on_chat_input_container_submitted(
         self, event: ChatInputContainer.Submitted
@@ -1167,6 +1851,7 @@ class VibeApp(App):  # noqa: PLR0904
     ) -> list[ImageAttachment] | None:
         result = await self._build_image_attachments(payload)
         if isinstance(result, _ImageAttachmentRejection):
+            self._show_workspace(WorkspaceView.CHAT)
             await self._remove_loading_widget()
             if result.no_vision:
                 await self._mount_and_scroll(
@@ -1639,8 +2324,8 @@ class VibeApp(App):  # noqa: PLR0904
     ) -> None:
         self._apply_theme(message.theme)
         await self.agent_loop.config_orchestrator.set_field("/theme", message.theme)
-        await self.agent_loop.config_orchestrator.reload()
-        self.agent_loop.agent_manager.invalidate_config()
+        await self.agent_loop.refresh_config()
+        self._install_interactive_ports()
         await self._restyle_diff_widgets()
         await self._switch_to_input_app()
 
@@ -1661,6 +2346,7 @@ class VibeApp(App):  # noqa: PLR0904
     async def on_mcpapp_mcpclosed(self, _message: MCPApp.MCPClosed) -> None:
         await self._mount_and_scroll(UserCommandMessage("MCP servers closed."))
         await self._switch_to_input_app()
+        self._show_workspace(WorkspaceView.CHAT)
 
     async def on_mcpapp_mcptoggled(self, message: MCPApp.MCPToggled) -> None:
         from vibe.cli.textual_ui.widgets.mcp_app import MCPSourceKind
@@ -1673,12 +2359,13 @@ class VibeApp(App):  # noqa: PLR0904
             tool_name=message.tool_name,
         )
         await self._refresh_config_from_disk()
-        self.query_one(_get_mcp_app_class()).refresh_index()
+        self._sync_mcp_page_sources()
         self._refresh_banner()
 
     async def on_mcpapp_connector_auth_requested(
         self, message: MCPApp.ConnectorAuthRequested
     ) -> None:
+        self._show_workspace(WorkspaceView.CHAT)
         connector_auth_app_class = _get_connector_auth_app_class()
         await self._switch_to_input_app()
         await self._switch_from_input(
@@ -1692,6 +2379,7 @@ class VibeApp(App):  # noqa: PLR0904
     async def on_mcpapp_mcpoauth_requested(
         self, message: MCPApp.MCPOAuthRequested
     ) -> None:
+        self._show_workspace(WorkspaceView.CHAT)
         await self._switch_to_input_app()
         await self._switch_from_input(
             _get_mcp_oauth_app_class()(
@@ -2171,6 +2859,7 @@ class VibeApp(App):  # noqa: PLR0904
         tool_call_id: str,
         required_permissions: list[RequiredPermission] | None,
     ) -> tuple[ApprovalResponse, str | None]:
+        managed_context = get_managed_agent_callback_context()
         # Auto-approve only if parent is in auto-approve mode AND tool is enabled
         # This ensures subagents respect the main agent's tool restrictions
         if self.agent_loop and self.agent_loop.config.bypass_tool_permissions:
@@ -2178,6 +2867,11 @@ class VibeApp(App):  # noqa: PLR0904
                 return (ApprovalResponse.YES, None)
 
         async with self._user_interaction_lock:
+            self._show_workspace(WorkspaceView.CHAT)
+            if managed_context is None:
+                self._set_primary_activity(
+                    AgentRunState.ATTENTION, f"Approval needed for {tool}"
+                )
             await self._wait_for_typing_pause()
             self._pending_approval = asyncio.Future()
             self._terminal_notifier.notify(NotificationContext.ACTION_REQUIRED)
@@ -2189,11 +2883,17 @@ class VibeApp(App):  # noqa: PLR0904
             finally:
                 self._pending_approval = None
                 await self._switch_to_input_app()
+                if managed_context is None and self._agent_running:
+                    self._set_primary_activity(AgentRunState.WORKING, "Working")
 
     async def _user_input_callback(self, args: BaseModel) -> BaseModel:
+        managed_context = get_managed_agent_callback_context()
         question_args = cast(AskUserQuestionArgs, args)
 
         async with self._user_interaction_lock:
+            self._show_workspace(WorkspaceView.CHAT)
+            if managed_context is None:
+                self._set_primary_activity(AgentRunState.ATTENTION, "Question pending")
             await self._wait_for_typing_pause()
             self._pending_question = asyncio.Future()
             self._terminal_notifier.notify(NotificationContext.ACTION_REQUIRED)
@@ -2205,6 +2905,8 @@ class VibeApp(App):  # noqa: PLR0904
             finally:
                 self._pending_question = None
                 await self._switch_to_input_app()
+                if managed_context is None and self._agent_running:
+                    self._set_primary_activity(AgentRunState.WORKING, "Working")
 
     async def _handle_turn_error(self, *, cancelled: bool = False) -> None:
         if self._loading_widget and self._loading_widget.parent:
@@ -2225,9 +2927,14 @@ class VibeApp(App):  # noqa: PLR0904
 
     async def _handle_agent_loop_events(
         self, events: AsyncGenerator[BaseEvent]
-    ) -> None:
+    ) -> str:
+        assistant_content: list[str] = []
+        assistant_length = 0
         async for event in events:
             self._narrator_manager.on_turn_event(event)
+            session_changed = self._observe_public_event(event)
+            if session_changed:
+                await self._restart_managed_agent_events()
             if isinstance(event, WaitingForInputEvent):
                 await self._remove_loading_widget()
             elif isinstance(event, HookStartEvent):
@@ -2238,6 +2945,15 @@ class VibeApp(App):  # noqa: PLR0904
                 await self.event_handler.handle_event(
                     event, loading_widget=self._loading_widget
                 )
+            if (
+                isinstance(event, AssistantEvent)
+                and assistant_length < SHARED_CONVERSATION_INPUT_CHARS
+            ):
+                remaining = SHARED_CONVERSATION_INPUT_CHARS - assistant_length
+                content = event.content[:remaining]
+                assistant_content.append(content)
+                assistant_length += len(content)
+        return "".join(assistant_content)
 
     async def _handle_agent_loop_turn(
         self,
@@ -2247,7 +2963,8 @@ class VibeApp(App):  # noqa: PLR0904
         prebuilt_images: list[ImageAttachment] | None = None,
         prebuilt_payload: PathPromptPayload | None = None,
     ) -> None:
-        self._agent_running = True
+        self._begin_agent_turn()
+        turn_completed = False
 
         await self._remove_loading_widget()
 
@@ -2272,6 +2989,7 @@ class VibeApp(App):  # noqa: PLR0904
                 auto_title = format_session_title(title_segments) or None
             self._narrator_manager.cancel()
             self._narrator_manager.on_turn_start(prompt)
+            self._schedule_team_conversation(ConversationRole.USER, prompt)
             async with aclosing(
                 self.agent_loop.act(
                     prompt,
@@ -2280,13 +2998,18 @@ class VibeApp(App):  # noqa: PLR0904
                     images=images or None,
                 )
             ) as events:
-                await self._handle_agent_loop_events(events)
+                assistant_content = await self._handle_agent_loop_events(events)
+            self._schedule_team_conversation(
+                ConversationRole.ASSISTANT, assistant_content
+            )
+            turn_completed = True
         except asyncio.CancelledError:
             await self._handle_turn_error(cancelled=True)
             self._narrator_manager.on_turn_cancel()
             raise
         except Exception as e:
             await self._handle_turn_error()
+            self._show_workspace(WorkspaceView.CHAT)
 
             # _watch_init_completion already rendered the fatal startup error
             # and told the user to exit -- don't duplicate the message.
@@ -2305,20 +3028,65 @@ class VibeApp(App):  # noqa: PLR0904
                 ErrorMessage(message, collapsed=self._tools_collapsed)
             )
         finally:
-            self._narrator_manager.on_turn_end()
-            self._agent_running = False
-            self._interrupt_requested = False
-            self._agent_task = None
-            if self._loading_widget:
-                await self._loading_widget.remove()
-            self._loading_widget = None
+            await self._finalize_agent_loop_turn(turn_completed)
+
+    async def _finalize_agent_loop_turn(self, turn_completed: bool) -> None:
+        self._narrator_manager.on_turn_end()
+        self._finish_agent_turn()
+        self._interrupt_requested = False
+        self._agent_task = None
+        if self._loading_widget:
+            await self._loading_widget.remove()
+        self._loading_widget = None
+        try:
             if self.event_handler:
                 await self.event_handler.finalize_streaming()
                 self.event_handler.escalate_unresolved_errors()
-            self._queue.notify_busy_changed()
-            self._queue.start_drain_if_needed()
-            await self._refresh_windowing_from_history()
-            self._terminal_notifier.notify(NotificationContext.COMPLETE)
+            if turn_completed:
+                await self._apply_deferred_cli_control()
+        finally:
+            self._cli_control.discard_pending()
+        self._queue.notify_busy_changed()
+        self._queue.start_drain_if_needed()
+        await self._refresh_windowing_from_history()
+        self._terminal_notifier.notify(NotificationContext.COMPLETE)
+
+    def _begin_agent_turn(self) -> None:
+        self._cli_control.discard_pending()
+        self._agent_running = True
+        self._set_primary_activity(AgentRunState.RUNNING, "Starting turn")
+        self._refresh_workspace_pages()
+
+    def _finish_agent_turn(self) -> None:
+        self._agent_running = False
+        self._set_primary_activity(AgentRunState.IDLE)
+        self._refresh_workspace_pages()
+
+    async def _apply_deferred_cli_control(self) -> None:
+        request = self._cli_control.pop_pending()
+        if request is None:
+            return
+        try:
+            match request:
+                case CLICommandRequest(command=command):
+                    if not await self._handle_command(command):
+                        raise ValueError("Command is no longer available")
+                case CLISwitchAgentRequest(profile=profile):
+                    await self._switch_to_agent(profile)
+                case CLINavigateWorkspaceRequest(destination=destination):
+                    self._show_workspace(WorkspaceView(destination.value))
+        except Exception as error:
+            logger.error("Deferred CLI control failed", exc_info=error)
+            capture_sentry_exception(
+                error, fatal=False, tags={"vibe_boundary": "deferred_cli_control"}
+            )
+            self._show_workspace(WorkspaceView.CHAT)
+            await self._mount_and_scroll(
+                ErrorMessage(
+                    f"Deferred CLI action failed: {error}",
+                    collapsed=self._tools_collapsed,
+                )
+            )
 
     def _resolve_turn_error_message(self, e: Exception) -> str:
         if isinstance(e, RateLimitError):
@@ -2758,8 +3526,22 @@ class VibeApp(App):  # noqa: PLR0904
         await self.agent_loop.wait_until_ready()
         await self.agent_loop.tool_manager.refresh_remote_tools_async()
         await self.agent_loop.refresh_system_prompt()
+        self._sync_mcp_page_sources()
         self._refresh_banner()
         return "Refreshed."
+
+    def _sync_mcp_page_sources(self) -> None:
+        if not self.screen_stack:
+            return
+        connector_registry = (
+            self.agent_loop.connector_registry if self._connectors_enabled else None
+        )
+        self.query_one(_get_mcp_app_class()).update_sources(
+            self.config.mcp_servers,
+            tool_manager=self.agent_loop.tool_manager,
+            connector_registry=connector_registry,
+            mcp_registry=self.agent_loop.mcp_registry,
+        )
 
     async def _maybe_handle_mcp_subcommand(self, cmd_args: str) -> bool:
         parsed = parse_mcp_subcommand(cmd_args)
@@ -2908,6 +3690,7 @@ class VibeApp(App):  # noqa: PLR0904
         if await self._maybe_handle_mcp_subcommand(cmd_args):
             return
 
+        self._sync_mcp_page_sources()
         mcp_servers = self.config.mcp_servers
         connector_registry = (
             self.agent_loop.connector_registry if self._connectors_enabled else None
@@ -2915,14 +3698,6 @@ class VibeApp(App):  # noqa: PLR0904
         has_connectors = (
             connector_registry is not None and connector_registry.connector_count > 0
         )
-        if not mcp_servers and not has_connectors:
-            await self._mount_and_scroll(
-                UserCommandMessage("No MCP servers or connectors configured.")
-            )
-            return
-
-        if self._current_bottom_app == BottomApp.MCP:
-            return
         name = cmd_args.strip()
         connector_names = (
             connector_registry.get_connector_names() if connector_registry else []
@@ -2941,19 +3716,22 @@ class VibeApp(App):  # noqa: PLR0904
                 )
             )
             return
-        mcp_app_class = _get_mcp_app_class()
-        await self._mount_and_scroll(UserCommandMessage("MCP servers opened..."))
-        await self._switch_from_input(
-            mcp_app_class(
-                mcp_servers=mcp_servers,
-                tool_manager=self.agent_loop.tool_manager,
-                initial_server=name,
-                connector_registry=connector_registry,
-                mcp_registry=self.agent_loop.mcp_registry,
-                get_vibe_config=lambda: self.agent_loop.config,
-                refresh_callback=self._refresh_mcp_browser,
-            )
+        if not self.screen_stack:
+            self._pending_mcp_source = name
+            self._show_workspace(WorkspaceView.MCP, focus=False)
+            return
+        page = self.query_one(MCPPage)
+        if name:
+            page.show_source(name)
+        else:
+            page.show_index()
+        message = (
+            "MCP servers opened..."
+            if mcp_servers or has_connectors
+            else "No MCP servers or connectors configured."
         )
+        await self._mount_and_scroll(UserCommandMessage(message))
+        self._show_workspace(WorkspaceView.MCP)
 
     async def _show_status(self, **kwargs: Any) -> None:
         stats = self.agent_loop.stats
@@ -2967,6 +3745,16 @@ class VibeApp(App):  # noqa: PLR0904
 - **Cost**: ${stats.session_cost:.4f}
 """
         await self._mount_and_scroll(UserCommandMessage(status_text))
+
+    async def _show_orchestrator(self, **kwargs: Any) -> None:
+        self._show_workspace(WorkspaceView.CHAT)
+        if self.agent_loop.agent_profile.name == BuiltinAgentName.ORCHESTRATOR:
+            await self._mount_and_scroll(
+                UserCommandMessage("Orchestrator is already active.")
+            )
+            return
+        await self._switch_to_agent(BuiltinAgentName.ORCHESTRATOR)
+        await self._mount_and_scroll(UserCommandMessage("Orchestrator is active."))
 
     async def _show_config(self, **kwargs: Any) -> None:
         """Switch to the configuration app in the bottom panel."""
@@ -3165,11 +3953,14 @@ class VibeApp(App):  # noqa: PLR0904
             msg for msg in loaded_messages if msg.role != Role.system
         ]
 
+        await self.agent_loop.stop_managed_agents_for_session_change()
         self.agent_loop.session_id = session.session_id
         self.agent_loop.parent_session_id = metadata.get("parent_session_id")
         self.agent_loop.session_logger.resume_existing_session(
             session.session_id, session_path
         )
+        self._reset_activity_store()
+        await self._restart_managed_agent_events()
         await self.agent_loop.hydrate_experiments_from_session()
         current_system_messages = [
             msg for msg in self.agent_loop.messages if msg.role == Role.system
@@ -3194,11 +3985,13 @@ class VibeApp(App):  # noqa: PLR0904
         try:
             self._reset_ui_state()
             await self._load_more.hide()
-            await self.agent_loop.config_orchestrator.reload()
+            await self.agent_loop.refresh_config()
 
             await self.agent_loop.reload_with_initial_messages()
+            self._install_interactive_ports()
             await self._resolve_plan()
             self._narrator_manager.sync()
+            self._sync_mcp_page_sources()
 
             if self._banner:
                 cc, ct = compute_connector_counts(
@@ -3281,6 +4074,8 @@ class VibeApp(App):  # noqa: PLR0904
     async def _clear_history(self, **kwargs: Any) -> None:
         try:
             await self.agent_loop.clear_history()
+            self._reset_activity_store()
+            await self._restart_managed_agent_events()
             await self._reset_message_widgets()
 
             await self._messages_area.mount(SlashCommandMessage("clear"))
@@ -3303,6 +4098,7 @@ class VibeApp(App):  # noqa: PLR0904
         on-screen widgets and posts a notice that implementation is starting. The
         approved plan is re-mounted so it stays visible in the discussion.
         """
+        self._sync_activity_store_session()
         await self._reset_message_widgets()
         if plan_file_path is not None:
             await self._mount_and_scroll(PlanFileMessage(file_path=plan_file_path))
@@ -3376,9 +4172,11 @@ class VibeApp(App):  # noqa: PLR0904
         old_session_id: str,
         extra_instructions: str = "",
     ) -> None:
-        self._agent_running = True
+        self._begin_agent_turn()
         try:
             await self.agent_loop.compact(extra_instructions=extra_instructions)
+            self._sync_activity_store_session()
+            await self._restart_managed_agent_events()
             compact_msg.set_complete(
                 old_session_id=old_session_id, new_session_id=self.agent_loop.session_id
             )
@@ -3389,7 +4187,7 @@ class VibeApp(App):  # noqa: PLR0904
         except Exception as e:
             compact_msg.set_error(str(e))
         finally:
-            self._agent_running = False
+            self._finish_agent_turn()
             self._agent_task = None
             if self.event_handler:
                 self.event_handler.current_compact = None
@@ -3607,7 +4405,6 @@ class VibeApp(App):  # noqa: PLR0904
             BottomApp.VibeCodeProjectCreate: VibeCodeProjectCreateApp,
             BottomApp.VibeCodeProjectPicker: VibeCodeProjectPickerApp,
             BottomApp.SessionPicker: SessionPickerApp,
-            BottomApp.MCP: _get_mcp_app_class(),
             BottomApp.ConnectorAuth: _get_connector_auth_app_class(),
             BottomApp.MCPOAuth: _get_mcp_oauth_app_class(),
             BottomApp.Rewind: RewindApp,
@@ -3889,6 +4686,8 @@ class VibeApp(App):  # noqa: PLR0904
                 ) = await self.agent_loop.rewind_manager.rewind_to_message(
                     msg_index, restore_files=restore_files
                 )
+                self._sync_activity_store_session()
+                await self._restart_managed_agent_events()
             except RewindError as exc:
                 self.notify(str(exc), severity="error")
                 return
@@ -3945,12 +4744,15 @@ class VibeApp(App):  # noqa: PLR0904
         self._last_escape_time = None
 
     def _try_interrupt_bottom_app_escape(self) -> bool:
+        if (
+            self._workspace_view is WorkspaceView.MCP
+            and self._current_bottom_app is BottomApp.Input
+        ):
+            self._handle_bottom_app_close_escape(_get_mcp_app_class())
+            return True
         handlers = {
             BottomApp.Config: self._handle_config_app_escape,
             BottomApp.Voice: self._handle_voice_app_escape,
-            BottomApp.MCP: lambda: self._handle_bottom_app_close_escape(
-                _get_mcp_app_class()
-            ),
             BottomApp.ConnectorAuth: lambda: self._handle_bottom_app_close_escape(
                 _get_connector_auth_app_class()
             ),
@@ -4038,7 +4840,7 @@ class VibeApp(App):  # noqa: PLR0904
         self._last_escape_time = time.monotonic()
         if self._chat_widget.is_at_bottom:
             self.call_after_refresh(self._chat_widget.anchor)
-        self._focus_current_bottom_app()
+        self._focus_workspace_view()
         return interrupted
 
     def action_interrupt(self) -> None:
@@ -4083,18 +4885,31 @@ class VibeApp(App):  # noqa: PLR0904
             section.set_collapsed(self._tools_collapsed)
 
     def action_cycle_mode(self) -> None:
-        if self._current_bottom_app != BottomApp.Input:
+        if (
+            self._workspace_view is not WorkspaceView.CHAT
+            or self._current_bottom_app is not BottomApp.Input
+            or self._chat_input_container is None
+            or self._chat_input_container.input_widget is None
+            or not self._chat_input_container.input_widget.is_on_screen
+        ):
             return
         self._refresh_profile_widgets()
         self._focus_current_bottom_app()
         self._request_next_agent()
 
+    def on_chat_text_area_cycle_mode(self, _message: ChatTextArea.CycleMode) -> None:
+        self.action_cycle_mode()
+
     def _refresh_profile_widgets(self) -> None:
         self._update_profile_widgets(self.agent_loop.agent_profile)
 
     def _on_profile_changed(self) -> None:
+        self._install_interactive_ports()
         self._refresh_profile_widgets()
         self._refresh_banner()
+        state = AgentRunState.WORKING if self._agent_running else AgentRunState.IDLE
+        self._set_primary_activity(state, "Working" if self._agent_running else None)
+        self._refresh_workspace_pages()
 
     def _refresh_banner(self) -> None:
         if self._banner:
@@ -4124,8 +4939,17 @@ class VibeApp(App):  # noqa: PLR0904
             else self.agent_loop.agent_profile
         )
         target = manager.next_agent(base)
-        self._desired_agent = target.name
-        self._update_profile_widgets(target)
+        self._request_agent(target.name)
+
+    def _request_agent(self, target: str) -> None:
+        if (
+            not self._agent_switch_active
+            and target == self.agent_loop.agent_profile.name
+        ):
+            return
+        profile = self.agent_loop.agent_manager.get_agent(target)
+        self._desired_agent = profile.name
+        self._update_profile_widgets(profile)
         if self._chat_input_container:
             self._chat_input_container.set_switching_mode(True, show_indicator=False)
         if not self._agent_switch_active:
@@ -4158,7 +4982,7 @@ class VibeApp(App):  # noqa: PLR0904
             self.agent_loop.set_user_input_callback(self._user_input_callback)
         finally:
             spinner_timer.stop()
-        self._refresh_banner()
+        self._on_profile_changed()
 
     def _show_switch_spinner(self) -> None:
         if self._chat_input_container and self._agent_switch_active:
@@ -4219,6 +5043,9 @@ class VibeApp(App):  # noqa: PLR0904
         self.agent_loop.emit_session_closed_telemetry()
 
     async def _begin_shutdown(self) -> None:
+        await self._stop_managed_agent_events()
+        self.agent_loop.set_cli_control_port(None)
+        await self._stop_team_workspace()
         await self._queue.shutdown()
         await self._loop_runner.stop()
 

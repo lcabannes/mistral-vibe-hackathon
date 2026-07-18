@@ -43,6 +43,7 @@ from vibe.core.config.models import (
     ProjectContextConfig,
     ProviderConfig,
     SessionLoggingConfig,
+    TeamWorkspaceConfig,
     TranscribeModelConfig,
     TranscribeProviderConfig,
     TTSModelConfig,
@@ -51,6 +52,7 @@ from vibe.core.config.models import (
     normalize_model_configs_with_defaults,
     serialize_model_configs,
 )
+from vibe.core.config.team_metadata import team_workspace_config_data
 from vibe.core.logger import logger
 from vibe.core.paths import GLOBAL_ENV_FILE
 from vibe.core.prompts import (
@@ -136,6 +138,20 @@ class TomlFileSettingsSource(PydanticBaseSettingsSource):
 
     def __call__(self) -> dict[str, Any]:
         return self.toml_data
+
+
+class TeamMetadataSettingsSource(PydanticBaseSettingsSource):
+    def __init__(self, settings_cls: type[BaseSettings]) -> None:
+        super().__init__(settings_cls)
+        self.data = team_workspace_config_data()
+
+    def get_field_value(
+        self, field: FieldInfo, field_name: str
+    ) -> tuple[Any, str, bool]:
+        return self.data.get(field_name), field_name, False
+
+    def __call__(self) -> dict[str, Any]:
+        return self.data
 
 
 def _remove_none_values(value: Any) -> Any:
@@ -316,6 +332,10 @@ class VibeConfig(BaseSettings):
     )
 
     enable_config_orchestrator: bool = Field(default=False, exclude=True)
+    enable_orchestrator_controls: bool = Field(default=False, exclude=True)
+    enable_cli_control: bool = Field(default=False, exclude=True)
+    enable_agent_management: bool = Field(default=False, exclude=True)
+    team_workspace: TeamWorkspaceConfig = Field(default_factory=TeamWorkspaceConfig)
 
     providers: list[ProviderConfig] = Field(
         default_factory=lambda: list(DEFAULT_PROVIDERS)
@@ -575,6 +595,7 @@ class VibeConfig(BaseSettings):
         return (
             init_settings,
             env_settings,
+            TeamMetadataSettingsSource(settings_cls),
             TomlFileSettingsSource(settings_cls),
             file_secret_settings,
         )

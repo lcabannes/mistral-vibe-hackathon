@@ -195,6 +195,7 @@ result-*
 
 # Vibe runtime/session files; keep selected project skills as part of repo
 .vibe/*
+!.vibe/team.toml
 !.vibe/skills/
 .vibe/skills/*
 !.vibe/skills/create-vibe-feature/

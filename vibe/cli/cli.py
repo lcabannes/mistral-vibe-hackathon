@@ -334,6 +334,7 @@ def _run_interactive_mode(
     from vibe.cli.textual_ui.app import StartupOptions, run_textual_ui
 
     try:
+        config.enable_cli_control = True
         agent_loop = AgentLoop(
             LegacyConfigOrchestrator(config),
             agent_name=initial_agent_name,

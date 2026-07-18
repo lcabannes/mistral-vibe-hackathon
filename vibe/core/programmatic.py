@@ -23,6 +23,18 @@ from vibe.core.utils import ConversationLimitException
 __all__ = ["TeleportError", "run_programmatic"]
 
 _DEFAULT_CLIENT_METADATA = ClientMetadata(name="vibe_programmatic", version=__version__)
+_PROGRAMMATIC_DISABLED_TOOLS = ("control_cli", "manage_agents")
+
+
+def _prepare_programmatic_config(config: VibeConfig) -> VibeConfig:
+    programmatic_config = config.model_copy(deep=True)
+    programmatic_config.disabled_tools = list(
+        dict.fromkeys([
+            *programmatic_config.disabled_tools,
+            *_PROGRAMMATIC_DISABLED_TOOLS,
+        ])
+    )
+    return programmatic_config
 
 
 def run_programmatic(  # noqa: PLR0913, PLR0917
@@ -41,10 +53,16 @@ def run_programmatic(  # noqa: PLR0913, PLR0917
     hook_config_result: HookConfigResult | None = None,
     terminal_emulator: TerminalEmulator | None = None,
 ) -> str | None:
+    if agent_name == BuiltinAgentName.ORCHESTRATOR:
+        raise ValueError(
+            "The orchestrator agent is not available through the programmatic surface"
+        )
+
     formatter = create_formatter(output_format)
+    programmatic_config = _prepare_programmatic_config(config)
 
     agent_loop = AgentLoop(
-        LegacyConfigOrchestrator(config),
+        LegacyConfigOrchestrator(programmatic_config),
         agent_name=agent_name,
         message_observer=formatter.on_message_added,
         max_turns=max_turns,

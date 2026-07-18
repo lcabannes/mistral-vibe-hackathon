@@ -69,6 +69,47 @@ class SessionLoggingConfig(BaseSettings):
         return str(Path(v).expanduser().resolve())
 
 
+class TeamWorkspaceConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    shared_root: str = ""
+    team_repository_url: str = ""
+    team_branch: str = "vibe-team-demo"
+    privacy_mode: Literal["status", "summaries"] = "status"
+    history_scope: Literal["status", "markers", "messages"] = "status"
+    history_limit: int = Field(default=50, ge=1, le=200)
+    heartbeat_interval_seconds: float = Field(default=5.0, gt=0)
+    presence_ttl_seconds: float = Field(default=30.0, gt=0)
+    member_name: str = ""
+
+    @field_validator("shared_root")
+    @classmethod
+    def expand_shared_root(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            return ""
+        return str(Path(stripped).expanduser().resolve())
+
+    @field_validator("member_name")
+    @classmethod
+    def trim_member_name(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("team_repository_url", "team_branch")
+    @classmethod
+    def trim_repository_fields(cls, value: str) -> str:
+        return value.strip()
+
+    @model_validator(mode="after")
+    def validate_presence_timing(self) -> TeamWorkspaceConfig:
+        if self.presence_ttl_seconds <= self.heartbeat_interval_seconds:
+            raise ValueError(
+                "presence_ttl_seconds must be greater than heartbeat_interval_seconds"
+            )
+        return self
+
+
 class ProviderConfig(BaseModel):
     name: str
     api_base: str

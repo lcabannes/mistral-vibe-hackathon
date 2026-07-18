@@ -131,7 +131,7 @@ from vibe.core.agent_loop import (
     CompactionFailedError,
     ImagesNotSupportedError,
 )
-from vibe.core.agents.models import CHAT as CHAT_AGENT
+from vibe.core.agents.models import CHAT as CHAT_AGENT, AgentProfile, BuiltinAgentName
 from vibe.core.auth import MCPOAuthError
 from vibe.core.cache_store import FileSystemVibeCodeCacheStore
 from vibe.core.config import (
@@ -225,7 +225,13 @@ from vibe.setup.onboarding.context import OnboardingContext
 logger = logging.getLogger("vibe")
 
 
-NON_INTERACTIVE_DISABLED_TOOLS = ["ask_user_question", "exit_plan_mode"]
+NON_INTERACTIVE_DISABLED_TOOLS = [
+    "ask_user_question",
+    "control_cli",
+    "exit_plan_mode",
+    "manage_agents",
+]
+ACP_UNSUPPORTED_AGENTS = frozenset({BuiltinAgentName.ORCHESTRATOR})
 INITIAL_AVAILABLE_COMMANDS_DELAY_SECONDS = 0.1
 _MCP_COMMAND_MAX_SPLITS = 2
 _MCP_COMMAND_ARG_INDEX = 2
@@ -249,6 +255,14 @@ def _merge_non_interactive_disabled_tools(config: AnyVibeConfig) -> None:
     for tool in NON_INTERACTIVE_DISABLED_TOOLS:
         if tool not in config.disabled_tools:
             config.disabled_tools.append(tool)
+
+
+def _available_acp_profiles(agent_loop: AgentLoop) -> list[AgentProfile]:
+    return [
+        profile
+        for profile in agent_loop.agent_manager.available_agents.values()
+        if profile.name not in ACP_UNSUPPORTED_AGENTS
+    ]
 
 
 class ForkSessionParams(BaseModel):
@@ -829,6 +843,10 @@ class VibeAcpAgentLoop(AcpAgent):
     def _create_agent_loop(
         self, config: VibeConfig, agent_name: str, hook_config_result: Any = None
     ) -> AgentLoop:
+        if agent_name in ACP_UNSUPPORTED_AGENTS:
+            raise ValueError(
+                f"Agent '{agent_name}' is not available through the ACP surface"
+            )
         agent_loop = AgentLoop(
             config_orchestrator=LegacyConfigOrchestrator(config),
             agent_name=agent_name,
@@ -843,7 +861,7 @@ class VibeAcpAgentLoop(AcpAgent):
 
     def _build_session_state(self, session: AcpSessionLoop) -> tuple[Any, Any]:
         modes_state, modes_config = build_mode_state(
-            list(session.agent_loop.agent_manager.available_agents.values()),
+            _available_acp_profiles(session.agent_loop),
             session.agent_loop.agent_profile.name,
         )
         return modes_state, modes_config
@@ -1312,7 +1330,7 @@ class VibeAcpAgentLoop(AcpAgent):
         )
 
     async def _apply_mode_change(self, session: AcpSessionLoop, mode_id: str) -> bool:
-        profiles = list(session.agent_loop.agent_manager.available_agents.values())
+        profiles = _available_acp_profiles(session.agent_loop)
         if not is_valid_acp_mode(profiles, mode_id):
             return False
 
@@ -2459,7 +2477,7 @@ class VibeAcpAgentLoop(AcpAgent):
         self, session: AcpSessionLoop
     ) -> list[SessionConfigOptionSelect | SessionConfigOptionBoolean]:
         """Build the current modes + models config options for a session."""
-        profiles = list(session.agent_loop.agent_manager.available_agents.values())
+        profiles = _available_acp_profiles(session.agent_loop)
         _, modes_config = build_mode_state(
             profiles, session.agent_loop.agent_profile.name
         )
