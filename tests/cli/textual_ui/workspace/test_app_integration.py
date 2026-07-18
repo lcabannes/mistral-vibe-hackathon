@@ -9,6 +9,7 @@ import httpx
 from pydantic import BaseModel
 import pytest
 from textual.binding import Binding
+from textual.geometry import Region
 from textual.widgets import ContentSwitcher, Input, Static
 
 from tests.conftest import build_test_vibe_app, build_test_vibe_config
@@ -276,6 +277,14 @@ async def test_home_keyboard_flow_cycles_agents_opens_composer_and_returns_to_ra
         assert command.value == "message agent 12345"
         assert app._workspace_view is WorkspaceView.HOME
         assert command.styles.color.hex == "#E0E0E0"
+        assert command.content_region.height == 1
+        rendered = "".join(
+            line.text
+            for line in command.render_lines(
+                Region(0, 0, command.region.width, command.region.height)
+            )
+        )
+        assert "message agent 12345" in rendered
 
         await pilot.press("escape")
         assert app.focused is navigation
