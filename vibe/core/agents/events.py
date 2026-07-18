@@ -45,9 +45,9 @@ class ManagedAgentCallbackContext(BaseModel):
     profile: str = Field(min_length=1, max_length=MAX_MANAGED_AGENT_PROFILE_CHARS)
 
 
-_MANAGED_AGENT_CALLBACK_CONTEXT: ContextVar[
-    ManagedAgentCallbackContext | None
-] = ContextVar("managed_agent_callback_context", default=None)
+_MANAGED_AGENT_CALLBACK_CONTEXT: ContextVar[ManagedAgentCallbackContext | None] = (
+    ContextVar("managed_agent_callback_context", default=None)
+)
 
 
 def get_managed_agent_callback_context() -> ManagedAgentCallbackContext | None:

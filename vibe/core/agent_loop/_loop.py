@@ -490,9 +490,9 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self.session_logger = SessionLogger(config.session_logging, self.session_id)
         self._hook_config_result = hook_config_result
         self._agent_supervisor: AgentSupervisor | None = None
-        self._managed_agent_lifecycle_listener: (
-            ManagedAgentLifecycleListener | None
-        ) = None
+        self._managed_agent_lifecycle_listener: ManagedAgentLifecycleListener | None = (
+            None
+        )
         self._hooks_manager = (
             HooksManager(hook_config_result.hooks) if hook_config_result else None
         )
@@ -700,9 +700,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 launch_context=self.launch_context,
                 hook_config_result=self._hook_config_result,
             )
-            supervisor.set_lifecycle_listener(
-                self._managed_agent_lifecycle_listener
-            )
+            supervisor.set_lifecycle_listener(self._managed_agent_lifecycle_listener)
             self._agent_supervisor = supervisor
         return self._agent_supervisor
 

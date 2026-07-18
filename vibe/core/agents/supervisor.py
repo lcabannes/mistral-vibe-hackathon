@@ -64,11 +64,20 @@ class ManagedTelemetryClient(Protocol):
 
 
 class ManagedAgentStats(Protocol):
-    steps: int
-    session_prompt_tokens: int
-    session_completion_tokens: int
-    context_tokens: int
-    session_cost: float
+    @property
+    def steps(self) -> int: ...
+
+    @property
+    def session_prompt_tokens(self) -> int: ...
+
+    @property
+    def session_completion_tokens(self) -> int: ...
+
+    @property
+    def context_tokens(self) -> int: ...
+
+    @property
+    def session_cost(self) -> float: ...
 
 
 class ManagedAgentLoop(Protocol):
@@ -153,9 +162,7 @@ class AgentSupervisor:
         self._lifecycle_listener: ManagedAgentLifecycleListener | None = None
         self._agents: dict[str, _ManagedAgent] = {}
         self._stopped_ids: deque[str] = deque()
-        self._subscribers: set[
-            asyncio.Queue[ManagedAgentLifecycleEvent | None]
-        ] = set()
+        self._subscribers: set[asyncio.Queue[ManagedAgentLifecycleEvent | None]] = set()
         self._next_agent_sequence = 1
         self._closed = False
 
@@ -336,10 +343,7 @@ class AgentSupervisor:
                                 ),
                             )
                 self._transition(
-                    agent,
-                    ManagedAgentState.IDLE,
-                    current_activity=None,
-                    error=None,
+                    agent, ManagedAgentState.IDLE, current_activity=None, error=None
                 )
             except asyncio.CancelledError:
                 self._transition(
@@ -352,8 +356,7 @@ class AgentSupervisor:
                     ManagedAgentState.FAILED,
                     current_activity=None,
                     error=self._bounded(
-                        str(exc) or type(exc).__name__,
-                        MAX_MANAGED_AGENT_ERROR_CHARS,
+                        str(exc) or type(exc).__name__, MAX_MANAGED_AGENT_ERROR_CHARS
                     ),
                 )
             finally:
@@ -388,10 +391,7 @@ class AgentSupervisor:
                 )
                 try:
                     return await callback(
-                        tool_name,
-                        callback_args,
-                        tool_call_id,
-                        required_permissions,
+                        tool_name, callback_args, tool_call_id, required_permissions
                     )
                 finally:
                     _reset_managed_agent_callback_context(token)
@@ -403,7 +403,9 @@ class AgentSupervisor:
 
         if self._user_input_callback_getter() is not None:
 
-            async def tracked_user_input_callback(callback_args: BaseModel) -> BaseModel:
+            async def tracked_user_input_callback(
+                callback_args: BaseModel,
+            ) -> BaseModel:
                 callback = self._user_input_callback_getter()
                 if callback is None:
                     raise RuntimeError("User input callback is no longer available")
@@ -484,10 +486,7 @@ class AgentSupervisor:
         queue.put_nowait(event)
 
     def _create_loop(
-        self,
-        profile: str,
-        agent_type: AgentType,
-        session_logging: SessionLoggingConfig,
+        self, profile: str, agent_type: AgentType, session_logging: SessionLoggingConfig
     ) -> ManagedAgentLoop:
         from vibe.core.agent_loop import AgentLoop
 
@@ -523,9 +522,9 @@ class AgentSupervisor:
         )
 
     def _next_id(self, requested: str) -> str:
-        base = (
-            re.sub(r"[^a-z0-9]+", "-", requested.lower()).strip("-") or "agent"
-        )[: MAX_MANAGED_AGENT_ID_CHARS - 12]
+        base = (re.sub(r"[^a-z0-9]+", "-", requested.lower()).strip("-") or "agent")[
+            : MAX_MANAGED_AGENT_ID_CHARS - 12
+        ]
         sequence = self._next_agent_sequence
         self._next_agent_sequence += 1
         return f"{base}-{sequence}"

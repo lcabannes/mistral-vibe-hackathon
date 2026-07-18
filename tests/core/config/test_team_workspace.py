@@ -35,10 +35,7 @@ def test_team_workspace_rejects_nonpositive_heartbeat(heartbeat: float) -> None:
 
 def test_team_workspace_requires_ttl_longer_than_heartbeat() -> None:
     with pytest.raises(ValueError, match="must be greater"):
-        TeamWorkspaceConfig(
-            heartbeat_interval_seconds=10,
-            presence_ttl_seconds=10,
-        )
+        TeamWorkspaceConfig(heartbeat_interval_seconds=10, presence_ttl_seconds=10)
 
 
 @pytest.mark.parametrize("config_type", [VibeConfig, VibeConfigSchema])

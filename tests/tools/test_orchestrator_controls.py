@@ -131,12 +131,8 @@ def test_control_cli_args_are_strict() -> None:
         })
 
 
-@pytest.mark.parametrize(
-    "permission", [ToolPermission.NEVER, ToolPermission.ASK, ToolPermission.ALWAYS]
-)
-def test_manage_agents_preserves_configured_permission(
-    permission: ToolPermission,
-) -> None:
+def test_only_start_requires_manage_agents_approval() -> None:
+    permission = ToolPermission.ASK
     config = ManageAgentsConfig(permission=permission)
     tool = ManageAgents(config_getter=lambda: config, state=BaseToolState())
 
@@ -149,7 +145,9 @@ def test_manage_agents_preserves_configured_permission(
 
     assert tool.config.permission is permission
     assert tool.resolve_permission(start) is None
-    assert tool.resolve_permission(message) is None
+    resolved = tool.resolve_permission(message)
+    assert resolved is not None
+    assert resolved.permission is ToolPermission.ALWAYS
 
 
 @pytest.mark.parametrize(

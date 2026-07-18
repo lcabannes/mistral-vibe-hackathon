@@ -15,6 +15,7 @@ from vibe.core.tools.base import (
     ToolError,
     ToolPermission,
 )
+from vibe.core.tools.permissions import PermissionContext
 from vibe.core.tools.ui import ToolCallDisplay, ToolResultDisplay, ToolUIData
 from vibe.core.types import ToolCallEvent, ToolResultEvent, ToolStreamEvent
 
@@ -139,6 +140,11 @@ class ManageAgents(
     @classmethod
     def get_status_text(cls) -> str:
         return "Managing agents"
+
+    def resolve_permission(self, args: ManageAgentsArgs) -> PermissionContext | None:
+        if args.action is ManageAgentsAction.START:
+            return None
+        return PermissionContext(permission=ToolPermission.ALWAYS)
 
     async def run(
         self, args: ManageAgentsArgs, ctx: InvokeContext | None = None

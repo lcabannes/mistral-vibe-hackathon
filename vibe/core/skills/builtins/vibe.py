@@ -49,12 +49,30 @@ agents, prompts, logs, and session data live here.
 
 When in a trusted folder, Vibe also looks for project-local configuration:
 - `.vibe/config.toml` - Project-specific config (overrides user config)
+- `.vibe/team.toml` - Committed repository-scoped team workspace metadata
 - `.vibe/hooks.toml` - Project-specific hooks (requires trusted folder)
 - `.vibe/skills/` - Project-specific skills
 - `.vibe/tools/` - Project-specific tools (`<name>.py`); a `prompts/<name>.md` beside them sets or overrides the description of the tool named `<name>` — builtin, MCP, or custom (e.g. `.vibe/tools/prompts/bash.md` re-describes `bash`). Same `tools/*.py` + `tools/prompts/*.md` layout as the builtins.
 - `.vibe/agents/` - Project-specific agents
 - `.vibe/prompts/` - Project-specific prompts
 - `.agents/skills/` - Standard agent skills directory
+
+### Team Workspaces
+
+`vibe team join <team-repo-url>` validates the shared Git transport and writes
+`.vibe/team.toml`. Commit this file so trusted clones autojoin on launch. The
+special URL `origin` resolves the source checkout's origin, while shared state
+uses a separate cache checkout and the `vibe-team-demo` branch without changing
+the source branch.
+
+Generic joins default to status-only activity plus conversation markers and a
+history limit of 50. `--history status` disables conversation entries;
+`--history messages` explicitly shares bounded user/assistant message text.
+Set `[team_workspace] privacy_mode = "summaries"` in Vibe configuration to opt
+into fixed coarse activity summaries. Lifecycle sync never includes prompts,
+reasoning, tool inputs or outputs, commands, environment values, approvals, or
+response text. Never commit a credentialed team repository URL; Git remote
+access defines the team trust boundary.
 
 ### AGENTS.md Discovery
 
