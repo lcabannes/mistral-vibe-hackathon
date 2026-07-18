@@ -5,7 +5,7 @@ from contextvars import ContextVar, Token
 from pydantic import BaseModel, ConfigDict, Field
 
 from vibe.core.agents.models import ManagedAgentState
-from vibe.core.types import BaseEvent
+from vibe.core.types import BaseEvent, LLMUsage
 
 MAX_MANAGED_AGENT_TASK_CHARS = 4_000
 MAX_MANAGED_AGENT_ACTIVITY_CHARS = 1_000
@@ -31,11 +31,15 @@ class ManagedAgentLifecycleEvent(BaseEvent):
     child_session_id: str = Field(
         min_length=1, max_length=MAX_MANAGED_AGENT_SESSION_ID_CHARS
     )
+    task: str = Field(min_length=1, max_length=MAX_MANAGED_AGENT_TASK_CHARS)
     state: ManagedAgentState
     current_activity: str | None = Field(
         default=None, max_length=MAX_MANAGED_AGENT_ACTIVITY_CHARS
     )
     queued_messages: int = Field(default=0, ge=0)
+    error: str | None = Field(default=None, max_length=MAX_MANAGED_AGENT_ERROR_CHARS)
+    last_response: str = Field(default="", max_length=MAX_MANAGED_AGENT_RESPONSE_CHARS)
+    usage: LLMUsage | None = None
 
 
 class ManagedAgentCallbackContext(BaseModel):
@@ -45,9 +49,9 @@ class ManagedAgentCallbackContext(BaseModel):
     profile: str = Field(min_length=1, max_length=MAX_MANAGED_AGENT_PROFILE_CHARS)
 
 
-_MANAGED_AGENT_CALLBACK_CONTEXT: ContextVar[
-    ManagedAgentCallbackContext | None
-] = ContextVar("managed_agent_callback_context", default=None)
+_MANAGED_AGENT_CALLBACK_CONTEXT: ContextVar[ManagedAgentCallbackContext | None] = (
+    ContextVar("managed_agent_callback_context", default=None)
+)
 
 
 def get_managed_agent_callback_context() -> ManagedAgentCallbackContext | None:

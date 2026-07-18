@@ -24,7 +24,6 @@ from vibe.core.agents.events import (
     _reset_managed_agent_callback_context,
     _set_managed_agent_callback_context,
 )
-from vibe.core.agents.management_port import ManagedAgentLifecycleListener
 from vibe.core.agents.models import (
     AgentType,
     BuiltinAgentName,
@@ -33,7 +32,7 @@ from vibe.core.agents.models import (
 )
 from vibe.core.config import AnyVibeConfig, SessionLoggingConfig
 from vibe.core.config.orchestrator_legacy import LegacyConfigOrchestrator
-from vibe.core.types import AssistantEvent, ToolCallEvent
+from vibe.core.types import AssistantEvent, LLMUsage, ToolCallEvent
 
 if TYPE_CHECKING:
     from vibe.core.agents.manager import AgentManager
@@ -68,7 +67,9 @@ class ManagedAgentStats(Protocol):
     session_prompt_tokens: int
     session_completion_tokens: int
     context_tokens: int
-    session_cost: float
+
+    @property
+    def session_cost(self) -> float: ...
 
 
 class ManagedAgentLoop(Protocol):
@@ -122,7 +123,45 @@ class _ManagedAgent:
     closed: bool = False
     started_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
+    attention_base_state: ManagedAgentState | None = None
+    attention_base_activity: str | None = None
+    pending_attention: dict[int, str] = field(default_factory=dict)
+    next_attention_id: int = 1
     stop_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+
+class _ManagedEventSubscriber:
+    def __init__(self) -> None:
+        self._pending: dict[str, ManagedAgentLifecycleEvent] = {}
+        self._wake = asyncio.Event()
+        self._closed = False
+
+    def offer(self, event: ManagedAgentLifecycleEvent) -> bool:
+        if (
+            event.agent_id not in self._pending
+            and len(self._pending) >= MANAGED_AGENT_EVENT_QUEUE_SIZE
+        ):
+            return False
+        self._pending[event.agent_id] = event
+        self._wake.set()
+        return True
+
+    def replace(self, events: list[ManagedAgentLifecycleEvent]) -> None:
+        self._pending = {event.agent_id: event for event in events}
+        self._wake.set()
+
+    def close(self) -> None:
+        self._closed = True
+        self._wake.set()
+
+    async def get(self) -> ManagedAgentLifecycleEvent | None:
+        while not self._pending:
+            if self._closed:
+                return None
+            self._wake.clear()
+            await self._wake.wait()
+        agent_id = next(iter(self._pending))
+        return self._pending.pop(agent_id)
 
 
 class AgentSupervisor:
@@ -150,19 +189,11 @@ class AgentSupervisor:
         self._launch_context = launch_context
         self._hook_config_result = hook_config_result
         self._loop_factory = loop_factory or self._create_loop
-        self._lifecycle_listener: ManagedAgentLifecycleListener | None = None
         self._agents: dict[str, _ManagedAgent] = {}
         self._stopped_ids: deque[str] = deque()
-        self._subscribers: set[
-            asyncio.Queue[ManagedAgentLifecycleEvent | None]
-        ] = set()
+        self._subscribers: set[_ManagedEventSubscriber] = set()
         self._next_agent_sequence = 1
         self._closed = False
-
-    def set_lifecycle_listener(
-        self, listener: ManagedAgentLifecycleListener | None
-    ) -> None:
-        self._lifecycle_listener = listener
 
     async def start(
         self, profile: str, task: str, *, name: str | None = None
@@ -286,17 +317,15 @@ class AgentSupervisor:
     ) -> AsyncGenerator[ManagedAgentLifecycleEvent, None]:
         if self._closed:
             return
-        queue: asyncio.Queue[ManagedAgentLifecycleEvent | None] = asyncio.Queue(
-            maxsize=MANAGED_AGENT_EVENT_QUEUE_SIZE
-        )
-        self._subscribers.add(queue)
+        subscriber = _ManagedEventSubscriber()
+        self._subscribers.add(subscriber)
         for agent in self._agents.values():
-            self._offer(queue, self._event(agent, advance=False))
+            subscriber.offer(self._event(agent, advance=False))
         try:
-            while (event := await queue.get()) is not None:
+            while (event := await subscriber.get()) is not None:
                 yield event
         finally:
-            self._subscribers.discard(queue)
+            self._subscribers.discard(subscriber)
 
     async def aclose(self) -> None:
         if self._closed:
@@ -305,8 +334,8 @@ class AgentSupervisor:
         self._closed = True
         subscribers = tuple(self._subscribers)
         self._subscribers.clear()
-        for queue in subscribers:
-            self._offer(queue, None)
+        for subscriber in subscribers:
+            subscriber.close()
 
     async def _run(self, agent: _ManagedAgent) -> None:
         while True:
@@ -336,10 +365,7 @@ class AgentSupervisor:
                                 ),
                             )
                 self._transition(
-                    agent,
-                    ManagedAgentState.IDLE,
-                    current_activity=None,
-                    error=None,
+                    agent, ManagedAgentState.IDLE, current_activity=None, error=None
                 )
             except asyncio.CancelledError:
                 self._transition(
@@ -352,8 +378,7 @@ class AgentSupervisor:
                     ManagedAgentState.FAILED,
                     current_activity=None,
                     error=self._bounded(
-                        str(exc) or type(exc).__name__,
-                        MAX_MANAGED_AGENT_ERROR_CHARS,
+                        str(exc) or type(exc).__name__, MAX_MANAGED_AGENT_ERROR_CHARS
                     ),
                 )
             finally:
@@ -371,15 +396,8 @@ class AgentSupervisor:
                 callback = self._approval_callback_getter()
                 if callback is None:
                     raise RuntimeError("Approval callback is no longer available")
-                previous_state = agent.state
-                previous_activity = agent.current_activity
-                self._transition(
-                    agent,
-                    ManagedAgentState.ATTENTION,
-                    current_activity=self._bounded(
-                        f"Approval needed for {tool_name}",
-                        MAX_MANAGED_AGENT_ACTIVITY_CHARS,
-                    ),
+                attention_id = self._begin_attention(
+                    agent, f"Approval needed for {tool_name}"
                 )
                 token = _set_managed_agent_callback_context(
                     ManagedAgentCallbackContext(
@@ -388,32 +406,23 @@ class AgentSupervisor:
                 )
                 try:
                     return await callback(
-                        tool_name,
-                        callback_args,
-                        tool_call_id,
-                        required_permissions,
+                        tool_name, callback_args, tool_call_id, required_permissions
                     )
                 finally:
                     _reset_managed_agent_callback_context(token)
-                    self._transition(
-                        agent, previous_state, current_activity=previous_activity
-                    )
+                    self._end_attention(agent, attention_id)
 
             agent.loop.set_approval_callback(tracked_approval_callback)
 
         if self._user_input_callback_getter() is not None:
 
-            async def tracked_user_input_callback(callback_args: BaseModel) -> BaseModel:
+            async def tracked_user_input_callback(
+                callback_args: BaseModel,
+            ) -> BaseModel:
                 callback = self._user_input_callback_getter()
                 if callback is None:
                     raise RuntimeError("User input callback is no longer available")
-                previous_state = agent.state
-                previous_activity = agent.current_activity
-                self._transition(
-                    agent,
-                    ManagedAgentState.ATTENTION,
-                    current_activity="Waiting for user input",
-                )
+                attention_id = self._begin_attention(agent, "Waiting for user input")
                 token = _set_managed_agent_callback_context(
                     ManagedAgentCallbackContext(
                         agent_id=agent.agent_id, profile=agent.profile
@@ -423,11 +432,48 @@ class AgentSupervisor:
                     return await callback(callback_args)
                 finally:
                     _reset_managed_agent_callback_context(token)
-                    self._transition(
-                        agent, previous_state, current_activity=previous_activity
-                    )
+                    self._end_attention(agent, attention_id)
 
             agent.loop.set_user_input_callback(tracked_user_input_callback)
+
+    def _begin_attention(self, agent: _ManagedAgent, activity: str) -> int | None:
+        if agent.terminal_emitted:
+            return None
+        if not agent.pending_attention:
+            agent.attention_base_state = agent.state
+            agent.attention_base_activity = agent.current_activity
+        attention_id = agent.next_attention_id
+        agent.next_attention_id += 1
+        bounded_activity = self._bounded(activity, MAX_MANAGED_AGENT_ACTIVITY_CHARS)
+        agent.pending_attention[attention_id] = bounded_activity
+        self._transition(
+            agent,
+            ManagedAgentState.ATTENTION,
+            current_activity=self._active_attention_activity(agent),
+        )
+        return attention_id
+
+    def _end_attention(self, agent: _ManagedAgent, attention_id: int | None) -> None:
+        if attention_id is None:
+            return
+        agent.pending_attention.pop(attention_id, None)
+        if agent.terminal_emitted:
+            if not agent.pending_attention:
+                agent.attention_base_state = None
+                agent.attention_base_activity = None
+            return
+        if agent.pending_attention:
+            self._transition(
+                agent,
+                ManagedAgentState.ATTENTION,
+                current_activity=self._active_attention_activity(agent),
+            )
+            return
+        base_state = agent.attention_base_state or ManagedAgentState.RUNNING
+        base_activity = agent.attention_base_activity
+        agent.attention_base_state = None
+        agent.attention_base_activity = None
+        self._transition(agent, base_state, current_activity=base_activity)
 
     def _transition(
         self,
@@ -439,6 +485,15 @@ class AgentSupervisor:
     ) -> None:
         if agent.terminal_emitted:
             return
+        if (
+            agent.pending_attention
+            and state is not ManagedAgentState.ATTENTION
+            and state is not ManagedAgentState.STOPPED
+        ):
+            agent.attention_base_state = state
+            agent.attention_base_activity = current_activity
+            state = ManagedAgentState.ATTENTION
+            current_activity = self._active_attention_activity(agent)
         agent.state = state
         agent.current_activity = current_activity
         if error is not ...:
@@ -447,14 +502,19 @@ class AgentSupervisor:
             agent.terminal_emitted = True
         self._emit(agent)
 
+    @staticmethod
+    def _active_attention_activity(agent: _ManagedAgent) -> str:
+        return next(iter(agent.pending_attention.values()))
+
     def _emit(self, agent: _ManagedAgent) -> None:
         agent.updated_at = time.time()
         event = self._event(agent, advance=True)
-        if self._lifecycle_listener is not None:
-            with suppress(Exception):
-                self._lifecycle_listener(event)
-        for queue in tuple(self._subscribers):
-            self._offer(queue, event)
+        for subscriber in tuple(self._subscribers):
+            if subscriber.offer(event):
+                continue
+            subscriber.replace([
+                self._event(current, advance=False) for current in self._agents.values()
+            ])
 
     def _event(
         self, agent: _ManagedAgent, *, advance: bool
@@ -468,26 +528,20 @@ class AgentSupervisor:
             agent_display_name=agent.profile_display_name,
             parent_session_id=agent.parent_session_id,
             child_session_id=agent.loop.session_id,
+            task=agent.task,
             state=agent.state,
             current_activity=agent.current_activity,
             queued_messages=agent.queue.qsize(),
+            error=agent.error,
+            last_response=agent.last_response,
+            usage=LLMUsage(
+                prompt_tokens=agent.loop.stats.session_prompt_tokens,
+                completion_tokens=agent.loop.stats.session_completion_tokens,
+            ),
         )
 
-    @staticmethod
-    def _offer(
-        queue: asyncio.Queue[ManagedAgentLifecycleEvent | None],
-        event: ManagedAgentLifecycleEvent | None,
-    ) -> None:
-        if queue.full():
-            with suppress(asyncio.QueueEmpty):
-                queue.get_nowait()
-        queue.put_nowait(event)
-
     def _create_loop(
-        self,
-        profile: str,
-        agent_type: AgentType,
-        session_logging: SessionLoggingConfig,
+        self, profile: str, agent_type: AgentType, session_logging: SessionLoggingConfig
     ) -> ManagedAgentLoop:
         from vibe.core.agent_loop import AgentLoop
 
@@ -523,9 +577,9 @@ class AgentSupervisor:
         )
 
     def _next_id(self, requested: str) -> str:
-        base = (
-            re.sub(r"[^a-z0-9]+", "-", requested.lower()).strip("-") or "agent"
-        )[: MAX_MANAGED_AGENT_ID_CHARS - 12]
+        base = (re.sub(r"[^a-z0-9]+", "-", requested.lower()).strip("-") or "agent")[
+            : MAX_MANAGED_AGENT_ID_CHARS - 12
+        ]
         sequence = self._next_agent_sequence
         self._next_agent_sequence += 1
         return f"{base}-{sequence}"
