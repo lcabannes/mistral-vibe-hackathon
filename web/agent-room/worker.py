@@ -47,9 +47,35 @@ from vibe.core.types import (
     ToolResultEvent,
 )
 
-MAX_TURNS = 48
-MAX_TOKENS = 250_000
-MAX_PRICE_DOLLARS = 5.0
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+# Per-worker budgets. A worker's "session tokens" are cumulative across every
+# turn, so a real implementation task needs a generous cap; the old 250k default
+# ran out mid-task. Override with the VIBE_ROOM_MAX_* environment variables.
+MAX_TURNS = _env_int("VIBE_ROOM_MAX_TURNS", 100)
+MAX_TOKENS = _env_int("VIBE_ROOM_MAX_TOKENS", 2_000_000)
+MAX_PRICE_DOLLARS = _env_float("VIBE_ROOM_MAX_PRICE", 20.0)
 NO_TOOLS_PATTERN = "__agent_room_no_tools__"
 
 
