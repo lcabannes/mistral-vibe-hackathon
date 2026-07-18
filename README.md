@@ -96,18 +96,13 @@ Git email on each laptop so Vibe creates two coworker identities instead of
 collapsing both machines into one room. Never share a Mistral API key between
 laptops or commit one to this repository.
 
-Before this feature is merged to the remote default branch, use the following
-clone command on both laptops after that branch has been pushed. After merge,
-use the commands in the Laptop A and Laptop B sections unchanged.
-
-```bash
-git clone --branch codex/team-coworker-rooms git@github.com:lcabannes/mistral-vibe-hackathon.git
-```
+The feature is on `main`. Run the Laptop A block once on Laptop A and the
+Laptop B block once on Laptop B; no feature branch or second clone is needed.
 
 #### Laptop A: install and start
 
 ```bash
-git clone git@github.com:lcabannes/mistral-vibe-hackathon.git
+git clone --branch main git@github.com:lcabannes/mistral-vibe-hackathon.git
 cd mistral-vibe-hackathon
 git config user.name "Laptop A name"
 git config user.email "laptop-a@example.test"
@@ -125,7 +120,7 @@ select **Open Agent Room**, or open
 #### Laptop B: install and start
 
 ```bash
-git clone git@github.com:lcabannes/mistral-vibe-hackathon.git
+git clone --branch main git@github.com:lcabannes/mistral-vibe-hackathon.git
 cd mistral-vibe-hackathon
 git config user.name "Laptop B name"
 git config user.email "laptop-b@example.test"
@@ -165,10 +160,10 @@ fresh clones then use the automatic path above.
 4. Confirm Laptop B cannot message, stop, move, approve, or merge Laptop A's cat. Those controls remain on the owning laptop.
 5. Change `Scout`'s state on Laptop A by sending a message or stopping it, then confirm the coarse synchronized state updates on Laptop B.
 
-The team branch contains only bounded, sanitized team records. Local prompts,
-approvals, worktree paths, session IDs, and merge controls are not copied into
-remote Agent Room controls. This demo opts into sanitized message history; stop
-future sharing on either laptop with:
+The team branch contains bounded team records. Local approvals, worktree paths,
+session IDs, and merge controls are not copied into remote Agent Room controls.
+This demo opts into sanitized message history, but sanitization is not a reason
+to put credentials in prompts. Stop future sharing on either laptop with:
 
 ```bash
 uv run --no-dev vibe team leave --trust
