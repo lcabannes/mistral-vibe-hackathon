@@ -303,7 +303,53 @@ async def test_office_card_ids_encode_opaque_activity_ids_without_collisions() -
 
         card_ids = {card.id for card in app.office.query(AgentStateCard)}
         assert card_ids == {
-            f"activity-{tool_call_id.encode().hex()}" for tool_call_id in tool_call_ids
+            f"activity-{activity.activity_id.encode().hex()}"
+            for activity in snapshot.activities
+        }
+
+
+@pytest.mark.asyncio
+async def test_office_mount_and_update_keep_namespaced_activity_ids_distinct() -> None:
+    app = _PagesApp()
+    task_activity = _activity(AgentRunState.REQUESTED, tool_call_id="managed:worker-1")
+    managed_activity = _activity(
+        AgentRunState.RUNNING, tool_call_id="managed:worker-1"
+    ).model_copy(
+        update={"managed_agent_id": "worker-1", "agent_display_name": "Worker"}
+    )
+    snapshot = AgentActivitySnapshot(
+        session_id="parent", activities=(task_activity, managed_activity)
+    )
+
+    assert task_activity.activity_id == "task:managed:worker-1"
+    assert managed_activity.activity_id == "managed:worker-1"
+
+    async with app.run_test() as pilot:
+        app.office.update_view(OfficeViewModel(snapshot))
+        await pilot.pause()
+
+        cards = tuple(app.office.query(AgentStateCard))
+        assert len(cards) == 2
+        assert len({card.id for card in cards}) == 2
+
+        updated = snapshot.model_copy(
+            update={
+                "activities": (
+                    task_activity.model_copy(update={"state": AgentRunState.COMPLETED}),
+                    managed_activity.model_copy(
+                        update={"state": AgentRunState.WORKING}
+                    ),
+                )
+            }
+        )
+        app.office.update_view(OfficeViewModel(updated))
+        await pilot.pause()
+
+        cards = tuple(app.office.query(AgentStateCard))
+        assert len(cards) == 2
+        assert {card.activity.state for card in cards} == {
+            AgentRunState.COMPLETED,
+            AgentRunState.WORKING,
         }
 
 

@@ -625,8 +625,7 @@ class HomePage(ResponsiveWorkspacePage):
             (
                 item
                 for item in self._view.snapshot.activities
-                if event.option.id
-                == f"action-{item.tool_call_id.encode().hex()}"
+                if event.option.id == f"action-{item.activity_id.encode().hex()}"
             ),
             None,
         )
@@ -662,7 +661,7 @@ class HomePage(ResponsiveWorkspacePage):
             text.append(activity.agent_display_name, style="bold")
             text.append(f": {activity.current_activity or activity.task}", style="dim")
             options.append(
-                Option(text, id=f"action-{activity.tool_call_id.encode().hex()}")
+                Option(text, id=f"action-{activity.activity_id.encode().hex()}")
             )
         return tuple(options)
 
@@ -826,36 +825,36 @@ class OfficePage(ResponsiveWorkspacePage):
         self._refresh_detail()
 
     def inspect(self, activity: AgentActivity) -> None:
-        self._inspected_id = activity.tool_call_id
+        self._inspected_id = activity.activity_id
         self._refresh_detail()
 
     def _cards(self) -> tuple[AgentStateCard, ...]:
         return tuple(
-            AgentStateCard(activity, id=_activity_widget_id(activity.tool_call_id))
+            AgentStateCard(activity, id=_activity_widget_id(activity.activity_id))
             for activity in self._view.snapshot.activities
         )
 
     def _refresh_cards(self) -> None:
         grid = self.query_one("#office-agent-grid", Container)
         existing = {
-            card.activity.tool_call_id: card for card in grid.query(AgentStateCard)
+            card.activity.activity_id: card for card in grid.query(AgentStateCard)
         }
         desired_ids = {
-            activity.tool_call_id for activity in self._view.snapshot.activities
+            activity.activity_id for activity in self._view.snapshot.activities
         }
         for empty in grid.query("#office-empty"):
             if desired_ids:
                 empty.remove()
-        for tool_call_id, card in existing.items():
-            if tool_call_id not in desired_ids:
+        for activity_id, card in existing.items():
+            if activity_id not in desired_ids:
                 card.remove()
         for activity in self._view.snapshot.activities:
-            if card := existing.get(activity.tool_call_id):
+            if card := existing.get(activity.activity_id):
                 card.update_activity(activity)
             else:
                 grid.mount(
                     AgentStateCard(
-                        activity, id=_activity_widget_id(activity.tool_call_id)
+                        activity, id=_activity_widget_id(activity.activity_id)
                     )
                 )
         if not desired_ids and not grid.query("#office-empty"):
@@ -869,7 +868,7 @@ class OfficePage(ResponsiveWorkspacePage):
             (
                 item
                 for item in self._view.snapshot.activities
-                if item.tool_call_id == self._inspected_id
+                if item.activity_id == self._inspected_id
             ),
             None,
         )
