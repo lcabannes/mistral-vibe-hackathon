@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from collections.abc import Callable
 import time
+from typing import Protocol, cast
 
 from pydantic import BaseModel, ValidationError
 
@@ -17,12 +18,20 @@ from vibe.core.agents.events import ManagedAgentLifecycleEvent
 from vibe.core.agents.models import ManagedAgentState
 from vibe.core.types import (
     BaseEvent,
+    LLMUsage,
     SubagentLifecycleEvent,
     ToolCallEvent,
     ToolResultEvent,
 )
 
 type AgentActivityListener = Callable[[AgentActivitySnapshot], None]
+
+
+class _ManagedAgentEventPayload(Protocol):
+    task: str
+    last_response: str
+    error: str | None
+    usage: LLMUsage | None
 
 
 def _project_model[T: BaseModel](
@@ -155,34 +164,32 @@ class AgentActivityStore:
         if current is not None:
             if current.state is AgentRunState.STOPPED:
                 return False
-            if current.event_sequence is not None and event.sequence <= current.event_sequence:
+            if (
+                current.event_sequence is not None
+                and event.sequence <= current.event_sequence
+            ):
                 return False
 
         now = self._clock()
+        payload = cast(_ManagedAgentEventPayload, event)
         activity = AgentActivity(
             tool_call_id=key,
             parent_session_id=event.parent_session_id,
             agent_name=event.profile,
             agent_display_name=event.agent_display_name,
-            task=f"{event.agent_display_name} managed agent",
+            task=payload.task,
             state=self._managed_state(event.state),
             started_at=current.started_at if current is not None else now,
             updated_at=now,
             child_session_id=event.child_session_id,
             current_activity=event.current_activity,
-            usage=None,
+            usage=payload.usage,
             managed_agent_id=event.agent_id,
             event_sequence=event.sequence,
             queued_messages=event.queued_messages,
-            last_response="",
-            error=(
-                "Managed agent failed"
-                if event.state is ManagedAgentState.FAILED
-                else None
-            ),
+            last_response=payload.last_response,
+            error=payload.error,
         )
-        if current == activity:
-            return False
         self._activities[key] = activity
         return True
 
