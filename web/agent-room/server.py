@@ -664,7 +664,8 @@ class AgentRoomStore:
             existing = self._runs.get(ORCHESTRATOR_ID)
             if existing is not None:
                 existing["auto_approve"] = True
-                existing.setdefault("enabled_tools", None)
+                existing["enabled_tools"] = None
+                existing["tool_policy"] = "all"
         if existing is not None:
             self._ensure_worker(ORCHESTRATOR_ID)
         else:
@@ -749,6 +750,7 @@ class AgentRoomStore:
             "resumable": True,
             "queued_messages": len(conversation),
             "enabled_tools": enabled_tools,
+            "tool_policy": "all" if enabled_tools is None else "selected",
             "auto_approve": auto_approve or is_orchestrator,
             "worktree_name": prepared.name,
             "worktree_path": str(prepared.path),
@@ -803,7 +805,7 @@ class AgentRoomStore:
         self._broadcast_management_snapshot()
         return run
 
-    def _ensure_worker(self, run_id: str) -> AgentWorker:
+    def _ensure_worker(self, run_id: str) -> AgentWorker:  # noqa: PLR0915
         leader = False
         with self._lock:
             run = self._get_run_locked(run_id)
@@ -836,6 +838,15 @@ class AgentRoomStore:
                         "merge_error": None,
                     })
                 enabled_tools = run.get("enabled_tools")
+                if "tool_policy" not in run:
+                    available = {item["name"] for item in self._tools}
+                    if (
+                        isinstance(enabled_tools, list)
+                        and set(enabled_tools) == available
+                    ):
+                        enabled_tools = None
+                    run["enabled_tools"] = enabled_tools
+                    run["tool_policy"] = "all" if enabled_tools is None else "selected"
                 if enabled_tools is not None and not isinstance(enabled_tools, list):
                     enabled_tools = None
                     run["enabled_tools"] = None

@@ -59,6 +59,7 @@ def make_run(run_id: str = "worker-1") -> dict[str, Any]:
         "error": None,
         "resumable": True,
         "enabled_tools": ["bash", "web_search"],
+        "tool_policy": "selected",
         "auto_approve": True,
         "queued_messages": 0,
         "worktree_path": "/tmp/worker",
