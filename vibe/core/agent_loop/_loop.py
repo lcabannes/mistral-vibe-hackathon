@@ -670,8 +670,8 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         return self._get_agent_supervisor()
 
     def _get_agent_supervisor(self) -> AgentSupervisor:
-        if not self.config.enable_agent_management:
-            raise RuntimeError("Agent management is not enabled")
+        if not self._interactive_surface_capabilities_enabled:
+            raise RuntimeError("Interactive agent management is not enabled")
         if self._agent_supervisor is None:
             self._agent_supervisor = AgentSupervisor(
                 base_config_getter=lambda: self.base_config,

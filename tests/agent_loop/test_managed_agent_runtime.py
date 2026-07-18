@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
@@ -43,12 +44,14 @@ class FakeCLIControlPort:
         return CLIControlResult(message="deferred")
 
 
-def make_orchestrator_loop(
+def make_agent_loop(
     config_orchestrator: ReloadingConfigOrchestrator | None = None,
+    *,
+    agent_name: str = BuiltinAgentName.ORCHESTRATOR,
 ) -> AgentLoop:
     return AgentLoop(
         config_orchestrator=config_orchestrator or ReloadingConfigOrchestrator(),
-        agent_name=BuiltinAgentName.ORCHESTRATOR,
+        agent_name=agent_name,
         backend=FakeBackend(),
         mcp_registry=FakeMCPRegistry(),
     )
@@ -57,7 +60,7 @@ def make_orchestrator_loop(
 @pytest.mark.asyncio
 async def test_interactive_capabilities_survive_config_reload() -> None:
     config_orchestrator = ReloadingConfigOrchestrator()
-    loop = make_orchestrator_loop(config_orchestrator)
+    loop = make_agent_loop(config_orchestrator)
 
     assert loop.config.enable_agent_management is False
     assert loop.config.enable_cli_control is False
@@ -80,7 +83,7 @@ async def test_interactive_capabilities_survive_config_reload() -> None:
 
 @pytest.mark.asyncio
 async def test_session_reset_stops_lazily_created_supervisor(monkeypatch) -> None:
-    loop = make_orchestrator_loop()
+    loop = make_agent_loop()
     loop.enable_interactive_surface_capabilities()
     supervisor = loop._get_agent_supervisor()
     stop_for_session_change = AsyncMock(wraps=supervisor.stop_for_session_change)
@@ -98,7 +101,7 @@ async def test_session_reset_stops_lazily_created_supervisor(monkeypatch) -> Non
 
 @pytest.mark.asyncio
 async def test_set_cli_control_port_accepts_port_and_none() -> None:
-    loop = make_orchestrator_loop()
+    loop = make_agent_loop()
     port = FakeCLIControlPort()
 
     loop.set_cli_control_port(port)
@@ -106,3 +109,31 @@ async def test_set_cli_control_port_accepts_port_and_none() -> None:
     loop.set_cli_control_port(None)
     assert loop.cli_control is None
     await loop.aclose()
+
+
+@pytest.mark.asyncio
+async def test_managed_event_subscription_survives_profile_switches() -> None:
+    loop = make_agent_loop(agent_name=BuiltinAgentName.DEFAULT)
+    with pytest.raises(RuntimeError, match="Interactive agent management"):
+        await anext(loop.managed_agent_events())
+
+    loop.enable_interactive_surface_capabilities()
+    supervisor = loop._get_agent_supervisor()
+    events = loop.managed_agent_events()
+    pending_event = asyncio.create_task(anext(events))
+    await asyncio.sleep(0)
+
+    assert pending_event.done() is False
+    assert "manage_agents" not in loop.tool_manager.available_tools
+    await loop.switch_agent(BuiltinAgentName.ORCHESTRATOR)
+    assert loop._get_agent_supervisor() is supervisor
+    assert pending_event.done() is False
+    assert "manage_agents" in loop.tool_manager.available_tools
+    await loop.switch_agent(BuiltinAgentName.DEFAULT)
+    assert loop._get_agent_supervisor() is supervisor
+    assert pending_event.done() is False
+    assert "manage_agents" not in loop.tool_manager.available_tools
+
+    await loop.aclose()
+    with pytest.raises(StopAsyncIteration):
+        await pending_event
