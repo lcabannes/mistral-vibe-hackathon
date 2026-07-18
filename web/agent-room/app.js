@@ -114,6 +114,9 @@ const elements = {
   simulateButton: document.querySelector("#simulate-button"),
   feedStatus: document.querySelector("#feed-status"),
   officeClock: document.querySelector("#office-clock"),
+  wallArtLogo: document.querySelector("#wall-art-logo"),
+  wallArtLandmark: document.querySelector("#wall-art-landmark"),
+  wallArtLandmarkUse: document.querySelector("#wall-art-landmark-use"),
   summaryRunning: document.querySelector("#summary-running"),
   summaryAttention: document.querySelector("#summary-attention"),
   summaryPast: document.querySelector("#summary-past"),
@@ -141,10 +144,13 @@ function persistState() {
   );
 }
 
-function syncThemeButtons(theme) {
+function syncThemeUI(theme) {
   for (const option of elements.themeGrid.querySelectorAll(".theme-option")) {
     option.setAttribute("aria-pressed", String(option.dataset.themeChoice === (theme || "")));
   }
+  elements.wallArtLandmarkUse.setAttribute("href", `#landmark-${theme || "default"}`);
+  elements.wallArtLogo.hidden = Boolean(theme);
+  elements.wallArtLandmark.hidden = !theme;
 }
 
 function applyTheme(theme) {
@@ -158,7 +164,7 @@ function applyTheme(theme) {
   } catch {
     /* localStorage unavailable (e.g. private mode) — theme still applies for this session */
   }
-  syncThemeButtons(theme);
+  syncThemeUI(theme);
 }
 
 async function loadRoom() {
@@ -1758,7 +1764,7 @@ function bindEvents() {
 
 async function start() {
   bindEvents();
-  syncThemeButtons(document.documentElement.getAttribute("data-theme"));
+  syncThemeUI(document.documentElement.getAttribute("data-theme"));
   renderSwatches();
   updateClock();
   try {

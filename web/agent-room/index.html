@@ -21,6 +21,183 @@
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
+    <svg class="sr-only" aria-hidden="true">
+      <defs>
+        <symbol id="landmark-default" viewBox="0 0 10 14">
+          <g fill="#7d7d88">
+            <rect x="4" y="0" width="2" height="1" />
+            <rect x="3" y="1" width="4" height="1" />
+            <rect x="2" y="2" width="6" height="1" />
+            <rect x="1" y="3" width="8" height="1" />
+            <rect x="0" y="4" width="10" height="1" />
+            <rect x="1" y="5" width="1" height="1" />
+            <rect x="8" y="5" width="1" height="1" />
+            <rect x="1" y="6" width="1" height="1" />
+            <rect x="8" y="6" width="1" height="1" />
+            <rect x="1" y="7" width="1" height="1" />
+            <rect x="8" y="7" width="1" height="1" />
+            <rect x="1" y="8" width="1" height="1" />
+            <rect x="4" y="8" width="2" height="1" />
+            <rect x="8" y="8" width="1" height="1" />
+            <rect x="1" y="9" width="1" height="1" />
+            <rect x="4" y="9" width="2" height="1" />
+            <rect x="8" y="9" width="1" height="1" />
+            <rect x="1" y="10" width="1" height="1" />
+            <rect x="4" y="10" width="2" height="1" />
+            <rect x="8" y="10" width="1" height="1" />
+            <rect x="1" y="11" width="1" height="1" />
+            <rect x="4" y="11" width="2" height="1" />
+            <rect x="8" y="11" width="1" height="1" />
+            <rect x="1" y="12" width="8" height="1" />
+            <rect x="0" y="13" width="10" height="1" />
+          </g>
+        </symbol>
+
+        <symbol id="landmark-paris" viewBox="0 0 10 14">
+          <g fill="#2f2f38">
+            <rect x="4" y="0" width="2" height="1" />
+            <rect x="4" y="1" width="2" height="1" />
+            <rect x="3" y="2" width="4" height="1" />
+            <rect x="3" y="3" width="4" height="1" />
+            <rect x="3" y="4" width="1" height="1" />
+            <rect x="6" y="4" width="1" height="1" />
+            <rect x="2" y="5" width="2" height="1" />
+            <rect x="6" y="5" width="2" height="1" />
+            <rect x="2" y="6" width="2" height="1" />
+            <rect x="6" y="6" width="2" height="1" />
+            <rect x="2" y="7" width="1" height="1" />
+            <rect x="7" y="7" width="1" height="1" />
+            <rect x="1" y="8" width="2" height="1" />
+            <rect x="7" y="8" width="2" height="1" />
+            <rect x="1" y="9" width="2" height="1" />
+            <rect x="7" y="9" width="2" height="1" />
+            <rect x="0" y="10" width="2" height="1" />
+            <rect x="8" y="10" width="2" height="1" />
+            <rect x="0" y="11" width="2" height="1" />
+            <rect x="8" y="11" width="2" height="1" />
+            <rect x="0" y="12" width="1" height="1" />
+            <rect x="9" y="12" width="1" height="1" />
+            <rect x="0" y="13" width="10" height="1" />
+          </g>
+        </symbol>
+
+        <symbol id="landmark-newyork" viewBox="0 0 10 14">
+          <g fill="#d4a437">
+            <rect x="4" y="0" width="2" height="1" />
+            <rect x="4" y="1" width="2" height="1" />
+            <rect x="4" y="2" width="2" height="1" />
+          </g>
+          <g fill="#6b6f78">
+            <rect x="3" y="3" width="4" height="1" />
+            <rect x="3" y="4" width="4" height="1" />
+            <rect x="2" y="5" width="6" height="1" />
+            <rect x="2" y="6" width="6" height="1" />
+            <rect x="2" y="7" width="6" height="1" />
+            <rect x="1" y="8" width="8" height="1" />
+            <rect x="1" y="9" width="8" height="1" />
+            <rect x="1" y="10" width="8" height="1" />
+            <rect x="1" y="11" width="8" height="1" />
+            <rect x="1" y="12" width="8" height="1" />
+            <rect x="0" y="13" width="10" height="1" />
+          </g>
+        </symbol>
+
+        <symbol id="landmark-sf" viewBox="0 0 10 14">
+          <g fill="#c0362c">
+            <rect x="1" y="0" width="1" height="1" />
+            <rect x="8" y="0" width="1" height="1" />
+            <rect x="1" y="1" width="1" height="1" />
+            <rect x="8" y="1" width="1" height="1" />
+            <rect x="1" y="2" width="1" height="1" />
+            <rect x="8" y="2" width="1" height="1" />
+            <rect x="1" y="3" width="1" height="1" />
+            <rect x="8" y="3" width="1" height="1" />
+            <rect x="0" y="4" width="3" height="1" />
+            <rect x="7" y="4" width="3" height="1" />
+            <rect x="1" y="5" width="1" height="1" />
+            <rect x="8" y="5" width="1" height="1" />
+            <rect x="1" y="6" width="1" height="1" />
+            <rect x="8" y="6" width="1" height="1" />
+            <rect x="1" y="7" width="1" height="1" />
+            <rect x="8" y="7" width="1" height="1" />
+            <rect x="1" y="8" width="1" height="1" />
+            <rect x="8" y="8" width="1" height="1" />
+            <rect x="0" y="9" width="10" height="1" />
+            <rect x="0" y="10" width="10" height="1" />
+            <rect x="1" y="11" width="1" height="1" />
+            <rect x="8" y="11" width="1" height="1" />
+            <rect x="1" y="12" width="1" height="1" />
+            <rect x="8" y="12" width="1" height="1" />
+            <rect x="1" y="13" width="1" height="1" />
+            <rect x="8" y="13" width="1" height="1" />
+          </g>
+        </symbol>
+
+        <symbol id="landmark-tokyo" viewBox="0 0 10 14">
+          <g fill="#e2231a">
+            <rect x="3" y="0" width="1" height="1" />
+            <rect x="6" y="0" width="1" height="1" />
+            <rect x="3" y="1" width="1" height="1" />
+            <rect x="6" y="1" width="1" height="1" />
+            <rect x="3" y="3" width="4" height="1" />
+            <rect x="3" y="4" width="1" height="1" />
+            <rect x="6" y="4" width="1" height="1" />
+            <rect x="2" y="6" width="2" height="1" />
+            <rect x="6" y="6" width="2" height="1" />
+            <rect x="2" y="7" width="1" height="1" />
+            <rect x="7" y="7" width="1" height="1" />
+            <rect x="1" y="9" width="2" height="1" />
+            <rect x="7" y="9" width="2" height="1" />
+            <rect x="0" y="10" width="2" height="1" />
+            <rect x="8" y="10" width="2" height="1" />
+            <rect x="0" y="12" width="1" height="1" />
+            <rect x="9" y="12" width="1" height="1" />
+            <rect x="0" y="13" width="10" height="1" />
+          </g>
+          <g fill="#f5f5f0">
+            <rect x="4" y="2" width="2" height="1" />
+            <rect x="2" y="5" width="2" height="1" />
+            <rect x="6" y="5" width="2" height="1" />
+            <rect x="1" y="8" width="2" height="1" />
+            <rect x="7" y="8" width="2" height="1" />
+            <rect x="0" y="11" width="2" height="1" />
+            <rect x="8" y="11" width="2" height="1" />
+          </g>
+        </symbol>
+
+        <symbol id="landmark-hacker" viewBox="0 0 10 14">
+          <g fill="#1c1c1c">
+            <rect x="0" y="0" width="10" height="1" />
+            <rect x="0" y="1" width="1" height="1" />
+            <rect x="9" y="1" width="1" height="1" />
+            <rect x="0" y="2" width="1" height="1" />
+            <rect x="9" y="2" width="1" height="1" />
+            <rect x="0" y="3" width="1" height="1" />
+            <rect x="9" y="3" width="1" height="1" />
+            <rect x="0" y="4" width="1" height="1" />
+            <rect x="9" y="4" width="1" height="1" />
+            <rect x="0" y="5" width="1" height="1" />
+            <rect x="9" y="5" width="1" height="1" />
+            <rect x="0" y="6" width="1" height="1" />
+            <rect x="9" y="6" width="1" height="1" />
+            <rect x="0" y="7" width="1" height="1" />
+            <rect x="9" y="7" width="1" height="1" />
+            <rect x="0" y="8" width="10" height="1" />
+            <rect x="4" y="9" width="2" height="1" />
+            <rect x="4" y="10" width="2" height="1" />
+            <rect x="2" y="11" width="6" height="1" />
+            <rect x="2" y="12" width="6" height="1" />
+          </g>
+          <g fill="#39ff6a">
+            <rect x="2" y="2" width="4" height="1" />
+            <rect x="2" y="4" width="5" height="1" />
+            <rect x="2" y="6" width="3" height="1" />
+            <rect x="5" y="6" width="2" height="1" />
+          </g>
+        </symbol>
+      </defs>
+    </svg>
+
     <div class="app-shell">
       <header class="topbar">
         <a class="brand" href="#" aria-label="Vibe Agent Room">
@@ -136,13 +313,23 @@
           <div class="room-window" aria-hidden="true">
             <span></span><span></span><span></span>
           </div>
-          <div class="wall-art" aria-hidden="true">
+          <div class="wall-art" id="wall-art" aria-hidden="true">
             <img
+              id="wall-art-logo"
               src="../../distribution/zed/icons/mistral_vibe.svg"
               alt=""
               width="28"
               height="28"
             />
+            <svg
+              id="wall-art-landmark"
+              class="wall-art-landmark"
+              viewBox="0 0 10 14"
+              shape-rendering="crispEdges"
+              hidden
+            >
+              <use id="wall-art-landmark-use" href="#landmark-default" />
+            </svg>
           </div>
           <div class="office-clock" aria-label="Local time" id="office-clock"></div>
           <div class="zones" id="zones"></div>
@@ -323,33 +510,7 @@
             <button type="button" class="theme-option" data-theme-choice="" aria-pressed="false">
               <span class="theme-icon" aria-hidden="true">
                 <svg viewBox="0 0 10 14" shape-rendering="crispEdges">
-                  <g fill="#7d7d88">
-                    <rect x="4" y="0" width="2" height="1" />
-                    <rect x="3" y="1" width="4" height="1" />
-                    <rect x="2" y="2" width="6" height="1" />
-                    <rect x="1" y="3" width="8" height="1" />
-                    <rect x="0" y="4" width="10" height="1" />
-                    <rect x="1" y="5" width="1" height="1" />
-                    <rect x="8" y="5" width="1" height="1" />
-                    <rect x="1" y="6" width="1" height="1" />
-                    <rect x="8" y="6" width="1" height="1" />
-                    <rect x="1" y="7" width="1" height="1" />
-                    <rect x="8" y="7" width="1" height="1" />
-                    <rect x="1" y="8" width="1" height="1" />
-                    <rect x="4" y="8" width="2" height="1" />
-                    <rect x="8" y="8" width="1" height="1" />
-                    <rect x="1" y="9" width="1" height="1" />
-                    <rect x="4" y="9" width="2" height="1" />
-                    <rect x="8" y="9" width="1" height="1" />
-                    <rect x="1" y="10" width="1" height="1" />
-                    <rect x="4" y="10" width="2" height="1" />
-                    <rect x="8" y="10" width="1" height="1" />
-                    <rect x="1" y="11" width="1" height="1" />
-                    <rect x="4" y="11" width="2" height="1" />
-                    <rect x="8" y="11" width="1" height="1" />
-                    <rect x="1" y="12" width="8" height="1" />
-                    <rect x="0" y="13" width="10" height="1" />
-                  </g>
+                  <use href="#landmark-default" />
                 </svg>
               </span>
               <span class="theme-option-body">
@@ -366,31 +527,7 @@
             <button type="button" class="theme-option" data-theme-choice="paris" aria-pressed="false">
               <span class="theme-icon" aria-hidden="true">
                 <svg viewBox="0 0 10 14" shape-rendering="crispEdges">
-                  <g fill="#2f2f38">
-                    <rect x="4" y="0" width="2" height="1" />
-                    <rect x="4" y="1" width="2" height="1" />
-                    <rect x="3" y="2" width="4" height="1" />
-                    <rect x="3" y="3" width="4" height="1" />
-                    <rect x="3" y="4" width="1" height="1" />
-                    <rect x="6" y="4" width="1" height="1" />
-                    <rect x="2" y="5" width="2" height="1" />
-                    <rect x="6" y="5" width="2" height="1" />
-                    <rect x="2" y="6" width="2" height="1" />
-                    <rect x="6" y="6" width="2" height="1" />
-                    <rect x="2" y="7" width="1" height="1" />
-                    <rect x="7" y="7" width="1" height="1" />
-                    <rect x="1" y="8" width="2" height="1" />
-                    <rect x="7" y="8" width="2" height="1" />
-                    <rect x="1" y="9" width="2" height="1" />
-                    <rect x="7" y="9" width="2" height="1" />
-                    <rect x="0" y="10" width="2" height="1" />
-                    <rect x="8" y="10" width="2" height="1" />
-                    <rect x="0" y="11" width="2" height="1" />
-                    <rect x="8" y="11" width="2" height="1" />
-                    <rect x="0" y="12" width="1" height="1" />
-                    <rect x="9" y="12" width="1" height="1" />
-                    <rect x="0" y="13" width="10" height="1" />
-                  </g>
+                  <use href="#landmark-paris" />
                 </svg>
               </span>
               <span class="theme-option-body">
@@ -407,24 +544,7 @@
             <button type="button" class="theme-option" data-theme-choice="newyork" aria-pressed="false">
               <span class="theme-icon" aria-hidden="true">
                 <svg viewBox="0 0 10 14" shape-rendering="crispEdges">
-                  <g fill="#d4a437">
-                    <rect x="4" y="0" width="2" height="1" />
-                    <rect x="4" y="1" width="2" height="1" />
-                    <rect x="4" y="2" width="2" height="1" />
-                  </g>
-                  <g fill="#6b6f78">
-                    <rect x="3" y="3" width="4" height="1" />
-                    <rect x="3" y="4" width="4" height="1" />
-                    <rect x="2" y="5" width="6" height="1" />
-                    <rect x="2" y="6" width="6" height="1" />
-                    <rect x="2" y="7" width="6" height="1" />
-                    <rect x="1" y="8" width="8" height="1" />
-                    <rect x="1" y="9" width="8" height="1" />
-                    <rect x="1" y="10" width="8" height="1" />
-                    <rect x="1" y="11" width="8" height="1" />
-                    <rect x="1" y="12" width="8" height="1" />
-                    <rect x="0" y="13" width="10" height="1" />
-                  </g>
+                  <use href="#landmark-newyork" />
                 </svg>
               </span>
               <span class="theme-option-body">
@@ -441,34 +561,7 @@
             <button type="button" class="theme-option" data-theme-choice="sf" aria-pressed="false">
               <span class="theme-icon" aria-hidden="true">
                 <svg viewBox="0 0 10 14" shape-rendering="crispEdges">
-                  <g fill="#c0362c">
-                    <rect x="1" y="0" width="1" height="1" />
-                    <rect x="8" y="0" width="1" height="1" />
-                    <rect x="1" y="1" width="1" height="1" />
-                    <rect x="8" y="1" width="1" height="1" />
-                    <rect x="1" y="2" width="1" height="1" />
-                    <rect x="8" y="2" width="1" height="1" />
-                    <rect x="1" y="3" width="1" height="1" />
-                    <rect x="8" y="3" width="1" height="1" />
-                    <rect x="0" y="4" width="3" height="1" />
-                    <rect x="7" y="4" width="3" height="1" />
-                    <rect x="1" y="5" width="1" height="1" />
-                    <rect x="8" y="5" width="1" height="1" />
-                    <rect x="1" y="6" width="1" height="1" />
-                    <rect x="8" y="6" width="1" height="1" />
-                    <rect x="1" y="7" width="1" height="1" />
-                    <rect x="8" y="7" width="1" height="1" />
-                    <rect x="1" y="8" width="1" height="1" />
-                    <rect x="8" y="8" width="1" height="1" />
-                    <rect x="0" y="9" width="10" height="1" />
-                    <rect x="0" y="10" width="10" height="1" />
-                    <rect x="1" y="11" width="1" height="1" />
-                    <rect x="8" y="11" width="1" height="1" />
-                    <rect x="1" y="12" width="1" height="1" />
-                    <rect x="8" y="12" width="1" height="1" />
-                    <rect x="1" y="13" width="1" height="1" />
-                    <rect x="8" y="13" width="1" height="1" />
-                  </g>
+                  <use href="#landmark-sf" />
                 </svg>
               </span>
               <span class="theme-option-body">
@@ -485,35 +578,7 @@
             <button type="button" class="theme-option" data-theme-choice="tokyo" aria-pressed="false">
               <span class="theme-icon" aria-hidden="true">
                 <svg viewBox="0 0 10 14" shape-rendering="crispEdges">
-                  <g fill="#e2231a">
-                    <rect x="3" y="0" width="1" height="1" />
-                    <rect x="6" y="0" width="1" height="1" />
-                    <rect x="3" y="1" width="1" height="1" />
-                    <rect x="6" y="1" width="1" height="1" />
-                    <rect x="3" y="3" width="4" height="1" />
-                    <rect x="3" y="4" width="1" height="1" />
-                    <rect x="6" y="4" width="1" height="1" />
-                    <rect x="2" y="6" width="2" height="1" />
-                    <rect x="6" y="6" width="2" height="1" />
-                    <rect x="2" y="7" width="1" height="1" />
-                    <rect x="7" y="7" width="1" height="1" />
-                    <rect x="1" y="9" width="2" height="1" />
-                    <rect x="7" y="9" width="2" height="1" />
-                    <rect x="0" y="10" width="2" height="1" />
-                    <rect x="8" y="10" width="2" height="1" />
-                    <rect x="0" y="12" width="1" height="1" />
-                    <rect x="9" y="12" width="1" height="1" />
-                    <rect x="0" y="13" width="10" height="1" />
-                  </g>
-                  <g fill="#f5f5f0">
-                    <rect x="4" y="2" width="2" height="1" />
-                    <rect x="2" y="5" width="2" height="1" />
-                    <rect x="6" y="5" width="2" height="1" />
-                    <rect x="1" y="8" width="2" height="1" />
-                    <rect x="7" y="8" width="2" height="1" />
-                    <rect x="0" y="11" width="2" height="1" />
-                    <rect x="8" y="11" width="2" height="1" />
-                  </g>
+                  <use href="#landmark-tokyo" />
                 </svg>
               </span>
               <span class="theme-option-body">
@@ -530,34 +595,7 @@
             <button type="button" class="theme-option" data-theme-choice="hacker" aria-pressed="false">
               <span class="theme-icon" aria-hidden="true">
                 <svg viewBox="0 0 10 14" shape-rendering="crispEdges">
-                  <g fill="#1c1c1c">
-                    <rect x="0" y="0" width="10" height="1" />
-                    <rect x="0" y="1" width="1" height="1" />
-                    <rect x="9" y="1" width="1" height="1" />
-                    <rect x="0" y="2" width="1" height="1" />
-                    <rect x="9" y="2" width="1" height="1" />
-                    <rect x="0" y="3" width="1" height="1" />
-                    <rect x="9" y="3" width="1" height="1" />
-                    <rect x="0" y="4" width="1" height="1" />
-                    <rect x="9" y="4" width="1" height="1" />
-                    <rect x="0" y="5" width="1" height="1" />
-                    <rect x="9" y="5" width="1" height="1" />
-                    <rect x="0" y="6" width="1" height="1" />
-                    <rect x="9" y="6" width="1" height="1" />
-                    <rect x="0" y="7" width="1" height="1" />
-                    <rect x="9" y="7" width="1" height="1" />
-                    <rect x="0" y="8" width="10" height="1" />
-                    <rect x="4" y="9" width="2" height="1" />
-                    <rect x="4" y="10" width="2" height="1" />
-                    <rect x="2" y="11" width="6" height="1" />
-                    <rect x="2" y="12" width="6" height="1" />
-                  </g>
-                  <g fill="#39ff6a">
-                    <rect x="2" y="2" width="4" height="1" />
-                    <rect x="2" y="4" width="5" height="1" />
-                    <rect x="2" y="6" width="3" height="1" />
-                    <rect x="5" y="6" width="2" height="1" />
-                  </g>
+                  <use href="#landmark-hacker" />
                 </svg>
               </span>
               <span class="theme-option-body">

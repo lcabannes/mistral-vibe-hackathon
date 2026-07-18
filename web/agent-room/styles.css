@@ -721,6 +721,11 @@ h1 {
   height: 28px;
 }
 
+.wall-art-landmark {
+  width: 30px;
+  height: 42px;
+}
+
 .office-clock {
   position: absolute;
   top: 28px;
@@ -1368,29 +1373,46 @@ h1 {
   border-top: 2px solid var(--ink);
 }
 
-.state-completed .cat-wrap,
-.state-cancelled .cat-wrap {
+.state-completed .cat-wrap {
   opacity: 0.72;
   transform: translateY(9px) scaleY(0.86);
 }
 
 .state-completed .sleep-mark,
-.state-idle .sleep-mark {
+.state-idle .sleep-mark,
+.state-cancelled .sleep-mark,
+.state-stopped .sleep-mark {
   display: block;
 }
 
-.state-completed .cat-eye,
-.state-cancelled .cat-eye {
+.state-completed .cat-eye {
   height: 2px;
   border-radius: 0;
 }
 
-.state-idle .cat-wrap {
+.state-idle .cat-wrap,
+.state-cancelled .cat-wrap,
+.state-stopped .cat-wrap {
   opacity: 0.88;
-  transform: translateY(8px) scaleY(0.94) rotate(-3deg);
+  transform: translateY(14px) scaleY(0.6) rotate(-6deg);
 }
 
-.state-idle .cat-eye {
+.state-idle .cat-head,
+.state-cancelled .cat-head,
+.state-stopped .cat-head {
+  transform: rotate(8deg) translate(-2px, 3px);
+}
+
+.state-idle .cat-paw,
+.state-cancelled .cat-paw,
+.state-stopped .cat-paw {
+  bottom: 1px;
+  opacity: 0.55;
+}
+
+.state-idle .cat-eye,
+.state-cancelled .cat-eye,
+.state-stopped .cat-eye {
   top: 20px;
   width: 7px;
   height: 4px;
@@ -1400,17 +1422,23 @@ h1 {
   border-radius: 50%;
 }
 
-.state-idle .cat-eye::after {
+.state-idle .cat-eye::after,
+.state-cancelled .cat-eye::after,
+.state-stopped .cat-eye::after {
   display: none;
 }
 
-.state-idle .cat-ear {
-  transform: rotate(60deg);
+.state-idle .cat-ear,
+.state-cancelled .cat-ear,
+.state-stopped .cat-ear {
+  transform: rotate(65deg);
 }
 
-.state-idle .cat-tail {
+.state-idle .cat-tail,
+.state-cancelled .cat-tail,
+.state-stopped .cat-tail {
   animation: none;
-  transform: rotate(18deg);
+  transform: rotate(48deg) translate(-6px, 4px);
 }
 
 .state-completed .status-label {
@@ -1449,7 +1477,9 @@ h1 {
 }
 
 .state-completed .sleep-mark,
-.state-idle .sleep-mark {
+.state-idle .sleep-mark,
+.state-cancelled .sleep-mark,
+.state-stopped .sleep-mark {
   animation: sleep-float 2.2s ease-out infinite;
 }
 
