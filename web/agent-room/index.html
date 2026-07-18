@@ -8,6 +8,16 @@
       content="A visual control room for Mistral Vibe agents."
     />
     <title>Vibe Agent Room</title>
+    <script>
+      (function () {
+        try {
+          var theme = localStorage.getItem("vibe-room-theme");
+          if (theme) document.documentElement.setAttribute("data-theme", theme);
+        } catch (error) {
+          /* localStorage unavailable (e.g. private mode) — fall back to default theme */
+        }
+      })();
+    </script>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
@@ -28,6 +38,15 @@
           <span class="feed-status" id="feed-status"><i></i><span>Demo feed</span></span>
           <button class="button" id="simulate-button" type="button">
             Pause motion
+          </button>
+          <button
+            class="icon-button"
+            id="settings-button"
+            type="button"
+            aria-label="Settings"
+            title="Settings"
+          >
+            <span class="nav-glyph settings-glyph" aria-hidden="true"></span>
           </button>
         </div>
       </header>
@@ -276,6 +295,286 @@
           <button class="button button-orange" id="agent-submit" value="default">
             Launch agent
           </button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="settings-dialog" class="settings-dialog">
+      <form method="dialog" id="settings-form">
+        <div class="dialog-heading">
+          <div>
+            <p class="eyebrow">Room look</p>
+            <h2>Settings</h2>
+          </div>
+          <button
+            class="icon-button"
+            value="cancel"
+            formnovalidate
+            aria-label="Close"
+            title="Close"
+          >
+            ×
+          </button>
+        </div>
+
+        <div class="theme-field">
+          <span>Vibe theme</span>
+          <div class="theme-grid" id="theme-grid" role="radiogroup" aria-label="Vibe theme">
+            <button type="button" class="theme-option" data-theme-choice="" aria-pressed="false">
+              <span class="theme-icon" aria-hidden="true">
+                <svg viewBox="0 0 10 14" shape-rendering="crispEdges">
+                  <g fill="#7d7d88">
+                    <rect x="4" y="0" width="2" height="1" />
+                    <rect x="3" y="1" width="4" height="1" />
+                    <rect x="2" y="2" width="6" height="1" />
+                    <rect x="1" y="3" width="8" height="1" />
+                    <rect x="0" y="4" width="10" height="1" />
+                    <rect x="1" y="5" width="1" height="1" />
+                    <rect x="8" y="5" width="1" height="1" />
+                    <rect x="1" y="6" width="1" height="1" />
+                    <rect x="8" y="6" width="1" height="1" />
+                    <rect x="1" y="7" width="1" height="1" />
+                    <rect x="8" y="7" width="1" height="1" />
+                    <rect x="1" y="8" width="1" height="1" />
+                    <rect x="4" y="8" width="2" height="1" />
+                    <rect x="8" y="8" width="1" height="1" />
+                    <rect x="1" y="9" width="1" height="1" />
+                    <rect x="4" y="9" width="2" height="1" />
+                    <rect x="8" y="9" width="1" height="1" />
+                    <rect x="1" y="10" width="1" height="1" />
+                    <rect x="4" y="10" width="2" height="1" />
+                    <rect x="8" y="10" width="1" height="1" />
+                    <rect x="1" y="11" width="1" height="1" />
+                    <rect x="4" y="11" width="2" height="1" />
+                    <rect x="8" y="11" width="1" height="1" />
+                    <rect x="1" y="12" width="8" height="1" />
+                    <rect x="0" y="13" width="10" height="1" />
+                  </g>
+                </svg>
+              </span>
+              <span class="theme-option-body">
+                <strong>Default</strong>
+                <span class="theme-swatch-row" aria-hidden="true">
+                  <i style="background: #fbfbf8"></i>
+                  <i style="background: #ff8205"></i>
+                  <i style="background: #5874d8"></i>
+                  <i style="background: #16835f"></i>
+                </span>
+              </span>
+            </button>
+
+            <button type="button" class="theme-option" data-theme-choice="paris" aria-pressed="false">
+              <span class="theme-icon" aria-hidden="true">
+                <svg viewBox="0 0 10 14" shape-rendering="crispEdges">
+                  <g fill="#2f2f38">
+                    <rect x="4" y="0" width="2" height="1" />
+                    <rect x="4" y="1" width="2" height="1" />
+                    <rect x="3" y="2" width="4" height="1" />
+                    <rect x="3" y="3" width="4" height="1" />
+                    <rect x="3" y="4" width="1" height="1" />
+                    <rect x="6" y="4" width="1" height="1" />
+                    <rect x="2" y="5" width="2" height="1" />
+                    <rect x="6" y="5" width="2" height="1" />
+                    <rect x="2" y="6" width="2" height="1" />
+                    <rect x="6" y="6" width="2" height="1" />
+                    <rect x="2" y="7" width="1" height="1" />
+                    <rect x="7" y="7" width="1" height="1" />
+                    <rect x="1" y="8" width="2" height="1" />
+                    <rect x="7" y="8" width="2" height="1" />
+                    <rect x="1" y="9" width="2" height="1" />
+                    <rect x="7" y="9" width="2" height="1" />
+                    <rect x="0" y="10" width="2" height="1" />
+                    <rect x="8" y="10" width="2" height="1" />
+                    <rect x="0" y="11" width="2" height="1" />
+                    <rect x="8" y="11" width="2" height="1" />
+                    <rect x="0" y="12" width="1" height="1" />
+                    <rect x="9" y="12" width="1" height="1" />
+                    <rect x="0" y="13" width="10" height="1" />
+                  </g>
+                </svg>
+              </span>
+              <span class="theme-option-body">
+                <strong>Paris Vibe</strong>
+                <span class="theme-swatch-row" aria-hidden="true">
+                  <i style="background: #f7f3ea"></i>
+                  <i style="background: #b5442e"></i>
+                  <i style="background: #35538f"></i>
+                  <i style="background: #e8b923"></i>
+                </span>
+              </span>
+            </button>
+
+            <button type="button" class="theme-option" data-theme-choice="newyork" aria-pressed="false">
+              <span class="theme-icon" aria-hidden="true">
+                <svg viewBox="0 0 10 14" shape-rendering="crispEdges">
+                  <g fill="#d4a437">
+                    <rect x="4" y="0" width="2" height="1" />
+                    <rect x="4" y="1" width="2" height="1" />
+                    <rect x="4" y="2" width="2" height="1" />
+                  </g>
+                  <g fill="#6b6f78">
+                    <rect x="3" y="3" width="4" height="1" />
+                    <rect x="3" y="4" width="4" height="1" />
+                    <rect x="2" y="5" width="6" height="1" />
+                    <rect x="2" y="6" width="6" height="1" />
+                    <rect x="2" y="7" width="6" height="1" />
+                    <rect x="1" y="8" width="8" height="1" />
+                    <rect x="1" y="9" width="8" height="1" />
+                    <rect x="1" y="10" width="8" height="1" />
+                    <rect x="1" y="11" width="8" height="1" />
+                    <rect x="1" y="12" width="8" height="1" />
+                    <rect x="0" y="13" width="10" height="1" />
+                  </g>
+                </svg>
+              </span>
+              <span class="theme-option-body">
+                <strong>NY Vibe</strong>
+                <span class="theme-swatch-row" aria-hidden="true">
+                  <i style="background: #eceae4"></i>
+                  <i style="background: #f2a900"></i>
+                  <i style="background: #2c5aa8"></i>
+                  <i style="background: #1f7a4d"></i>
+                </span>
+              </span>
+            </button>
+
+            <button type="button" class="theme-option" data-theme-choice="sf" aria-pressed="false">
+              <span class="theme-icon" aria-hidden="true">
+                <svg viewBox="0 0 10 14" shape-rendering="crispEdges">
+                  <g fill="#c0362c">
+                    <rect x="1" y="0" width="1" height="1" />
+                    <rect x="8" y="0" width="1" height="1" />
+                    <rect x="1" y="1" width="1" height="1" />
+                    <rect x="8" y="1" width="1" height="1" />
+                    <rect x="1" y="2" width="1" height="1" />
+                    <rect x="8" y="2" width="1" height="1" />
+                    <rect x="1" y="3" width="1" height="1" />
+                    <rect x="8" y="3" width="1" height="1" />
+                    <rect x="0" y="4" width="3" height="1" />
+                    <rect x="7" y="4" width="3" height="1" />
+                    <rect x="1" y="5" width="1" height="1" />
+                    <rect x="8" y="5" width="1" height="1" />
+                    <rect x="1" y="6" width="1" height="1" />
+                    <rect x="8" y="6" width="1" height="1" />
+                    <rect x="1" y="7" width="1" height="1" />
+                    <rect x="8" y="7" width="1" height="1" />
+                    <rect x="1" y="8" width="1" height="1" />
+                    <rect x="8" y="8" width="1" height="1" />
+                    <rect x="0" y="9" width="10" height="1" />
+                    <rect x="0" y="10" width="10" height="1" />
+                    <rect x="1" y="11" width="1" height="1" />
+                    <rect x="8" y="11" width="1" height="1" />
+                    <rect x="1" y="12" width="1" height="1" />
+                    <rect x="8" y="12" width="1" height="1" />
+                    <rect x="1" y="13" width="1" height="1" />
+                    <rect x="8" y="13" width="1" height="1" />
+                  </g>
+                </svg>
+              </span>
+              <span class="theme-option-body">
+                <strong>SF Vibe</strong>
+                <span class="theme-swatch-row" aria-hidden="true">
+                  <i style="background: #eef2f1"></i>
+                  <i style="background: #c0362c"></i>
+                  <i style="background: #3d7ea6"></i>
+                  <i style="background: #1f7f6b"></i>
+                </span>
+              </span>
+            </button>
+
+            <button type="button" class="theme-option" data-theme-choice="tokyo" aria-pressed="false">
+              <span class="theme-icon" aria-hidden="true">
+                <svg viewBox="0 0 10 14" shape-rendering="crispEdges">
+                  <g fill="#e2231a">
+                    <rect x="3" y="0" width="1" height="1" />
+                    <rect x="6" y="0" width="1" height="1" />
+                    <rect x="3" y="1" width="1" height="1" />
+                    <rect x="6" y="1" width="1" height="1" />
+                    <rect x="3" y="3" width="4" height="1" />
+                    <rect x="3" y="4" width="1" height="1" />
+                    <rect x="6" y="4" width="1" height="1" />
+                    <rect x="2" y="6" width="2" height="1" />
+                    <rect x="6" y="6" width="2" height="1" />
+                    <rect x="2" y="7" width="1" height="1" />
+                    <rect x="7" y="7" width="1" height="1" />
+                    <rect x="1" y="9" width="2" height="1" />
+                    <rect x="7" y="9" width="2" height="1" />
+                    <rect x="0" y="10" width="2" height="1" />
+                    <rect x="8" y="10" width="2" height="1" />
+                    <rect x="0" y="12" width="1" height="1" />
+                    <rect x="9" y="12" width="1" height="1" />
+                    <rect x="0" y="13" width="10" height="1" />
+                  </g>
+                  <g fill="#f5f5f0">
+                    <rect x="4" y="2" width="2" height="1" />
+                    <rect x="2" y="5" width="2" height="1" />
+                    <rect x="6" y="5" width="2" height="1" />
+                    <rect x="1" y="8" width="2" height="1" />
+                    <rect x="7" y="8" width="2" height="1" />
+                    <rect x="0" y="11" width="2" height="1" />
+                    <rect x="8" y="11" width="2" height="1" />
+                  </g>
+                </svg>
+              </span>
+              <span class="theme-option-body">
+                <strong>Tokyo Vibe</strong>
+                <span class="theme-swatch-row" aria-hidden="true">
+                  <i style="background: #14121f"></i>
+                  <i style="background: #ff5da2"></i>
+                  <i style="background: #4fd6ff"></i>
+                  <i style="background: #33e6b0"></i>
+                </span>
+              </span>
+            </button>
+
+            <button type="button" class="theme-option" data-theme-choice="hacker" aria-pressed="false">
+              <span class="theme-icon" aria-hidden="true">
+                <svg viewBox="0 0 10 14" shape-rendering="crispEdges">
+                  <g fill="#1c1c1c">
+                    <rect x="0" y="0" width="10" height="1" />
+                    <rect x="0" y="1" width="1" height="1" />
+                    <rect x="9" y="1" width="1" height="1" />
+                    <rect x="0" y="2" width="1" height="1" />
+                    <rect x="9" y="2" width="1" height="1" />
+                    <rect x="0" y="3" width="1" height="1" />
+                    <rect x="9" y="3" width="1" height="1" />
+                    <rect x="0" y="4" width="1" height="1" />
+                    <rect x="9" y="4" width="1" height="1" />
+                    <rect x="0" y="5" width="1" height="1" />
+                    <rect x="9" y="5" width="1" height="1" />
+                    <rect x="0" y="6" width="1" height="1" />
+                    <rect x="9" y="6" width="1" height="1" />
+                    <rect x="0" y="7" width="1" height="1" />
+                    <rect x="9" y="7" width="1" height="1" />
+                    <rect x="0" y="8" width="10" height="1" />
+                    <rect x="4" y="9" width="2" height="1" />
+                    <rect x="4" y="10" width="2" height="1" />
+                    <rect x="2" y="11" width="6" height="1" />
+                    <rect x="2" y="12" width="6" height="1" />
+                  </g>
+                  <g fill="#39ff6a">
+                    <rect x="2" y="2" width="4" height="1" />
+                    <rect x="2" y="4" width="5" height="1" />
+                    <rect x="2" y="6" width="3" height="1" />
+                    <rect x="5" y="6" width="2" height="1" />
+                  </g>
+                </svg>
+              </span>
+              <span class="theme-option-body">
+                <strong>Hacker Vibe</strong>
+                <span class="theme-swatch-row" aria-hidden="true">
+                  <i style="background: #05070a"></i>
+                  <i style="background: #39ff6a"></i>
+                  <i style="background: #ffb000"></i>
+                  <i style="background: #34e2e2"></i>
+                </span>
+              </span>
+            </button>
+          </div>
+        </div>
+
+        <div class="dialog-actions">
+          <button class="button button-orange" value="default">Done</button>
         </div>
       </form>
     </dialog>
