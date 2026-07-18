@@ -11,10 +11,11 @@ from vibe.cli.textual_ui.workspace.models import (
 )
 from vibe.cli.textual_ui.workspace.pages import (
     HomePage,
-    HomeViewModel,
+    OfficeViewModel,
     UsagePage,
     UsageViewModel,
 )
+from vibe.core.agent_room.models import AgentRoomConversationMessage
 
 
 def _activity(index: int, state: AgentRunState) -> AgentActivity:
@@ -28,27 +29,40 @@ def _activity(index: int, state: AgentRunState) -> AgentActivity:
         started_at=float(index),
         updated_at=float(index + 1),
         current_activity=f"Waiting for approval on responsive item {index}",
+        managed_agent_id=f"snapshot-agent-{index}",
+        conversation=(
+            AgentRoomConversationMessage(
+                id=f"snapshot-user-{index}",
+                role="user",
+                content=f"Please investigate task {index}.",
+            ),
+            AgentRoomConversationMessage(
+                id=f"snapshot-assistant-{index}",
+                role="assistant",
+                content=f"I found the relevant implementation for task {index}.",
+            ),
+        ),
     )
 
 
-def _populated_home_view() -> HomeViewModel:
+def _populated_home_view() -> OfficeViewModel:
     states = (
-        AgentRunState.ATTENTION,
-        AgentRunState.ATTENTION,
-        AgentRunState.ATTENTION,
-        AgentRunState.ATTENTION,
-        AgentRunState.ATTENTION,
-        AgentRunState.ATTENTION,
-        AgentRunState.ATTENTION,
         AgentRunState.FAILED,
-        AgentRunState.WORKING,
         AgentRunState.COMPLETED,
+        AgentRunState.IDLE,
+        AgentRunState.STOPPED,
+        AgentRunState.CANCELLED,
+        AgentRunState.FAILED,
+        AgentRunState.COMPLETED,
+        AgentRunState.IDLE,
+        AgentRunState.STOPPED,
+        AgentRunState.CANCELLED,
     )
     snapshot = AgentActivitySnapshot(
         session_id="parent",
         activities=tuple(_activity(index, state) for index, state in enumerate(states)),
     )
-    return HomeViewModel(snapshot, "System ready · 3 MCP sources connected")
+    return OfficeViewModel(snapshot, "Agent Room · main")
 
 
 def _populated_usage_view() -> UsageViewModel:

@@ -15,8 +15,12 @@ from vibe.cli.textual_ui.workspace.models import (
     AgentRunState,
     WorkspaceView,
 )
-from vibe.cli.textual_ui.workspace.navigation import WorkspaceNavigation
+from vibe.cli.textual_ui.workspace.navigation import (
+    VISIBLE_WORKSPACE_VIEWS,
+    WorkspaceNavigation,
+)
 from vibe.cli.textual_ui.workspace.pages import (
+    ActivityOverviewPage,
     AgentProfileViewModel,
     AgentsPage,
     AgentStateCard,
@@ -26,11 +30,11 @@ from vibe.cli.textual_ui.workspace.pages import (
     HomePage,
     HomeViewModel,
     MCPPage,
-    OfficePage,
     OfficeViewModel,
     UsagePage,
     UsageViewModel,
 )
+from vibe.core.agent_room.models import AgentRoomConversationMessage
 from vibe.core.agents.models import DEFAULT
 from vibe.core.config import MCPStdio
 
@@ -75,12 +79,12 @@ async def test_navigation_posts_typed_selection_for_every_view() -> None:
         navigation = app.query_one(WorkspaceNavigation)
         assert isinstance(navigation, NavigableOptionList)
 
-        for index, view in enumerate(WorkspaceView):
+        for index, view in enumerate(VISIBLE_WORKSPACE_VIEWS):
             navigation.highlighted = index
             await pilot.press("enter")
             assert navigation.selected_view is view
 
-    assert app.selected == list(WorkspaceView)
+    assert app.selected == list(VISIBLE_WORKSPACE_VIEWS)
 
 
 @pytest.mark.parametrize(
@@ -169,8 +173,8 @@ async def test_animated_state_border_stops_when_hidden_finished_and_unmounted() 
 def test_idle_primary_is_not_counted_as_active() -> None:
     activity = _activity(AgentRunState.IDLE)
     snapshot = AgentActivitySnapshot(session_id="parent", activities=(activity,))
-    home = HomePage(HomeViewModel(snapshot))
-    office = OfficePage(OfficeViewModel(snapshot))
+    home = ActivityOverviewPage(HomeViewModel(snapshot))
+    office = HomePage(OfficeViewModel(snapshot))
 
     assert "0 active" in str(home._overview_text())
     assert str(home._action_options()[0].prompt) == "✓ Clear"
@@ -181,7 +185,7 @@ def test_idle_primary_is_not_counted_as_active() -> None:
 def test_terminal_failure_is_history_not_live_action() -> None:
     activity = _activity(AgentRunState.FAILED)
     snapshot = AgentActivitySnapshot(session_id="parent", activities=(activity,))
-    home = HomePage(HomeViewModel(snapshot))
+    home = ActivityOverviewPage(HomeViewModel(snapshot))
 
     assert "0 attention" in str(home._overview_text())
     assert "1 recent fail" in str(home._overview_text())
@@ -193,8 +197,8 @@ class _PagesApp(App[None]):
     def __init__(self) -> None:
         super().__init__()
         empty_snapshot = AgentActivitySnapshot(session_id="parent")
-        self.home = HomePage(HomeViewModel(empty_snapshot))
-        self.office = OfficePage(OfficeViewModel(empty_snapshot))
+        self.home = ActivityOverviewPage(HomeViewModel(empty_snapshot))
+        self.office = HomePage(OfficeViewModel(empty_snapshot))
         self.agents = AgentsPage(AgentsViewModel())
         self.usage = UsagePage(
             UsageViewModel(
@@ -229,36 +233,38 @@ class _PagesApp(App[None]):
     def record_agent_selection(self, message: AgentsPage.AgentSelected) -> None:
         self.selected_agents.append(message.profile)
 
-    @on(HomePage.AttentionSelected)
-    def record_attention_selection(self, message: HomePage.AttentionSelected) -> None:
+    @on(ActivityOverviewPage.AttentionSelected)
+    def record_attention_selection(
+        self, message: ActivityOverviewPage.AttentionSelected
+    ) -> None:
         self.selected_attention.append(message.activity)
 
-    @on(OfficePage.AgentMessageSubmitted)
-    def record_agent_message(self, message: OfficePage.AgentMessageSubmitted) -> None:
+    @on(HomePage.AgentMessageSubmitted)
+    def record_agent_message(self, message: HomePage.AgentMessageSubmitted) -> None:
         self.agent_messages.append((message.agent_id, message.content))
 
-    @on(OfficePage.AgentCreateRequested)
-    def record_agent_create(self, message: OfficePage.AgentCreateRequested) -> None:
+    @on(HomePage.AgentCreateRequested)
+    def record_agent_create(self, message: HomePage.AgentCreateRequested) -> None:
         self.agent_tasks.append(message.task)
 
-    @on(OfficePage.AgentStopRequested)
-    def record_agent_stop(self, message: OfficePage.AgentStopRequested) -> None:
+    @on(HomePage.AgentStopRequested)
+    def record_agent_stop(self, message: HomePage.AgentStopRequested) -> None:
         self.stopped_agents.append(message.agent_id)
 
-    @on(OfficePage.AgentCancelRequested)
-    def record_agent_cancel(self, message: OfficePage.AgentCancelRequested) -> None:
+    @on(HomePage.AgentCancelRequested)
+    def record_agent_cancel(self, message: HomePage.AgentCancelRequested) -> None:
         self.cancelled_agents.append(message.agent_id)
 
-    @on(OfficePage.AgentApprovalResolved)
-    def record_agent_approval(self, message: OfficePage.AgentApprovalResolved) -> None:
+    @on(HomePage.AgentApprovalResolved)
+    def record_agent_approval(self, message: HomePage.AgentApprovalResolved) -> None:
         self.agent_approvals.append((
             message.agent_id,
             message.approval_id,
             message.decision,
         ))
 
-    @on(OfficePage.AgentQuestionAnswered)
-    def record_agent_answer(self, message: OfficePage.AgentQuestionAnswered) -> None:
+    @on(HomePage.AgentQuestionAnswered)
+    def record_agent_answer(self, message: HomePage.AgentQuestionAnswered) -> None:
         self.agent_answers.append((
             message.agent_id,
             message.question_id,
@@ -426,7 +432,38 @@ async def test_home_attention_and_office_details_use_typed_activity() -> None:
         )
 
         await pilot.press("escape")
-        assert not detail.display
+        assert detail.display
+
+
+@pytest.mark.asyncio
+async def test_home_auto_selects_agent_and_renders_complete_conversation() -> None:
+    app = _PagesApp()
+    conversation = tuple(
+        AgentRoomConversationMessage(
+            id=f"message-{index}",
+            role="user" if index % 2 == 0 else "assistant",
+            content=f"retained message {index}",
+        )
+        for index in range(20)
+    )
+    activity = _activity(AgentRunState.IDLE).model_copy(
+        update={"managed_agent_id": "agent-1", "conversation": conversation}
+    )
+
+    async with app.run_test(size=(100, 26)) as pilot:
+        app.office.update_view(
+            OfficeViewModel(
+                AgentActivitySnapshot(session_id="room", activities=(activity,))
+            )
+        )
+        await pilot.pause()
+
+        detail = app.office.query_one("#office-detail")
+        rendered = str(app.office.query_one("#office-detail-content", Static).render())
+        assert app.office._inspected_id == activity.activity_id
+        assert detail.display
+        assert "retained message 0" in rendered
+        assert "retained message 19" in rendered
 
 
 @pytest.mark.asyncio

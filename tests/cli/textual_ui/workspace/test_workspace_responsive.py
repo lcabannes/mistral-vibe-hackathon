@@ -5,7 +5,6 @@ from textual.widgets import Static
 
 from tests.conftest import build_test_vibe_app
 from vibe.cli.textual_ui.app import StartupOptions
-from vibe.cli.textual_ui.widgets.navigable_option_list import NavigableOptionList
 from vibe.cli.textual_ui.workspace.models import (
     AgentActivity,
     AgentActivitySnapshot,
@@ -13,8 +12,9 @@ from vibe.cli.textual_ui.workspace.models import (
     WorkspaceView,
 )
 from vibe.cli.textual_ui.workspace.pages import (
+    AgentStateCard,
     HomePage,
-    HomeViewModel,
+    OfficeViewModel,
     UsagePage,
     UsageViewModel,
 )
@@ -35,7 +35,7 @@ def _activity(index: int, state: AgentRunState) -> AgentActivity:
 
 
 @pytest.mark.asyncio
-async def test_narrow_home_exposes_every_live_attention_in_local_scroll() -> None:
+async def test_narrow_home_exposes_every_agent_in_local_scroll() -> None:
     app = build_test_vibe_app(startup=StartupOptions())
     attention = tuple(_activity(index, AgentRunState.ATTENTION) for index in range(7))
     failures = tuple(_activity(index, AgentRunState.FAILED) for index in range(7, 9))
@@ -45,29 +45,22 @@ async def test_narrow_home_exposes_every_live_attention_in_local_scroll() -> Non
 
     async with app.run_test(size=(70, 24)) as pilot:
         home = app.query_one(HomePage)
-        home.update_view(HomeViewModel(snapshot))
+        home.update_view(OfficeViewModel(snapshot))
         await pilot.pause()
 
-        action = home.query_one("#home-action-needed", NavigableOptionList)
+        grid = home.query_one("#office-agent-grid")
+        detail = home.query_one("#office-detail")
+        cards = tuple(home.query(AgentStateCard))
         assert home.max_scroll_y == 0
-        assert action.option_count == len(attention)
-        assert {
-            action.get_option_at_index(index).id for index in range(action.option_count)
-        } == {f"action-{activity.activity_id.encode().hex()}" for activity in attention}
-        assert action.virtual_size.height > action.size.height
-        assert action.region.bottom <= home.region.bottom
-        assert "2 recent fail" in str(home.query_one("#home-overview", Static).render())
+        assert len(cards) == len(attention) + len(failures)
+        assert grid.virtual_size.height > grid.size.height
+        assert grid.region.bottom <= detail.region.y
+        assert detail.region.bottom <= home.region.bottom
+        assert home._inspected_id == attention[0].activity_id
 
-        action.focus()
-        await pilot.press(*("down" for _ in range(action.option_count - 1)))
-        assert app.focused is action
-        highlighted = action.highlighted
-        assert highlighted is not None
-        assert highlighted == action.option_count - 1
-        assert action.scroll_offset.y > 0
-        assert f"! {action.option_count} Attention" in str(
-            action.get_option_at_index(highlighted).prompt
-        )
+        cards[-1].focus()
+        await pilot.pause()
+        assert grid.scroll_offset.y > 0
 
 
 @pytest.mark.asyncio

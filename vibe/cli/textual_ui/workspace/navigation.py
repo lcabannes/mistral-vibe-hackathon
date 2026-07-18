@@ -11,12 +11,11 @@ from vibe.cli.textual_ui.workspace.models import WorkspaceView
 _VIEW_LABELS: tuple[tuple[WorkspaceView, str, str], ...] = (
     (WorkspaceView.HOME, "⌂", "Home"),
     (WorkspaceView.CHAT, "◆", "Chat"),
-    (WorkspaceView.OFFICE, "▦", "Office"),
-    (WorkspaceView.AGENTS, "◎", "Agents"),
     (WorkspaceView.MCP, "◇", "MCP"),
     (WorkspaceView.USAGE, "▥", "Usage"),
     (WorkspaceView.COWORKERS, "♢", "Coworkers"),
 )
+VISIBLE_WORKSPACE_VIEWS = tuple(view for view, _glyph, _label in _VIEW_LABELS)
 
 
 def _view_option(view: WorkspaceView, glyph: str, label: str) -> Option:
@@ -84,4 +83,4 @@ class WorkspaceNavigation(NavigableOptionList):
         )
 
 
-__all__ = ["WorkspaceNavigation"]
+__all__ = ["VISIBLE_WORKSPACE_VIEWS", "WorkspaceNavigation"]

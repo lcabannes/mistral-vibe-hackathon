@@ -3,7 +3,7 @@
 Local web control room for persistent Mistral Vibe agents.
 
 ```bash
-uv run python web/agent-room/server.py --workdir /path/to/integration-worktree
+uv run vibe --server --workdir /path/to/integration-worktree
 ```
 
 Open <http://127.0.0.1:4173/web/agent-room/>.
@@ -29,7 +29,7 @@ The Orchestrator cat controls the same worker registry through Vibe's typed
 commands. Browser chat also supports `/help`, `/status`, `/history`, `/queue`,
 `/cancel`, `/stop`, and `/retry`; prefix a literal slash with `//`.
 
-In the CLI Office, select any retained agent to read the same conversation and
+In CLI Home, select any retained agent to read the same conversation and
 send another message. The controls also cancel a turn, stop a process, approve
 or deny a tool call, and answer pending questions. Stopped and failed agents
 remain selectable; sending a message resumes the same session and worktree.

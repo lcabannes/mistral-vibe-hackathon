@@ -18,12 +18,14 @@ from vibe.cli.textual_ui.widgets.chat_input import ChatInputContainer
 from vibe.cli.textual_ui.widgets.chat_input.text_area import ChatTextArea
 from vibe.cli.textual_ui.widgets.mcp_app import MCPApp
 from vibe.cli.textual_ui.widgets.messages import UserMessage
-from vibe.cli.textual_ui.widgets.navigable_option_list import NavigableOptionList
 from vibe.cli.textual_ui.widgets.question_app import QuestionApp
 from vibe.cli.textual_ui.workspace.coworkers import CoworkersPage
 from vibe.cli.textual_ui.workspace.models import AgentRunState, WorkspaceView
-from vibe.cli.textual_ui.workspace.navigation import WorkspaceNavigation
-from vibe.cli.textual_ui.workspace.pages import AgentsPage, HomePage, OfficePage
+from vibe.cli.textual_ui.workspace.navigation import (
+    VISIBLE_WORKSPACE_VIEWS,
+    WorkspaceNavigation,
+)
+from vibe.cli.textual_ui.workspace.pages import AgentStateCard, HomePage
 from vibe.core.agent_room import AgentRoomClient
 from vibe.core.config import MCPStdio
 from vibe.core.control_port import CLINavigateWorkspaceRequest, WorkspaceDestination
@@ -100,16 +102,20 @@ async def test_agent_home_uses_the_discovered_room_as_management_backend() -> No
     async with app.run_test() as pilot:
         await pilot.pause()
         assert app.agent_loop.agent_management is client
-        office = app.query_one(OfficePage)
-        activity = office._view.snapshot.activities[0]
+        home = app.query_one(HomePage)
+        activity = home._view.snapshot.activities[0]
         assert activity.managed_agent_id == "agent-shared"
         assert activity.conversation[-1].content == "Visible in both clients"
         assert activity.context_tokens == 50
         assert activity.worktree_path == "/tmp/room-shared-builder"
+        assert home._inspected_id == activity.activity_id
+        assert "Visible in both clients" in str(
+            home.query_one("#office-detail-content", Static).render()
+        )
 
 
 @pytest.mark.asyncio
-async def test_six_views_switch_without_rebuilding_chat_state() -> None:
+async def test_five_views_switch_without_rebuilding_chat_state() -> None:
     app = build_test_vibe_app(startup=StartupOptions())
 
     async with app.run_test() as pilot:
@@ -122,7 +128,7 @@ async def test_six_views_switch_without_rebuilding_chat_state() -> None:
         assert switcher.current == "workspace-home"
         assert navigation.selected_view is WorkspaceView.HOME
 
-        for view in WorkspaceView:
+        for view in VISIBLE_WORKSPACE_VIEWS:
             app.action_show_workspace(view.value)
             assert switcher.current == f"workspace-{view.value}"
             assert navigation.selected_view is view
@@ -136,7 +142,7 @@ async def test_six_views_switch_without_rebuilding_chat_state() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("view", list(WorkspaceView))
+@pytest.mark.parametrize("view", VISIBLE_WORKSPACE_VIEWS)
 async def test_ctrl_navigation_bindings_switch_real_content(
     view: WorkspaceView,
 ) -> None:
@@ -144,7 +150,7 @@ async def test_ctrl_navigation_bindings_switch_real_content(
 
     async with app.run_test(size=(120, 36)) as pilot:
         switcher = app.query_one(ContentSwitcher)
-        index = tuple(WorkspaceView).index(view) + 1
+        index = VISIBLE_WORKSPACE_VIEWS.index(view) + 1
         await pilot.press(f"ctrl+{index}")
         assert switcher.current == f"workspace-{view.value}"
         assert app.query_one(f"#workspace-{view.value}").display
@@ -158,7 +164,7 @@ async def test_numeric_navigation_outside_chat_switches_content() -> None:
     async with app.run_test(size=(120, 36)) as pilot:
         switcher = app.query_one(ContentSwitcher)
         await pilot.press("3")
-        assert switcher.current == "workspace-office"
+        assert switcher.current == "workspace-mcp"
 
 
 @pytest.mark.asyncio
@@ -197,7 +203,7 @@ async def test_clicking_rail_destination_switches_content() -> None:
         navigation = app.query_one(WorkspaceNavigation)
         assert await pilot.click(navigation, offset=(3, 3))
         await pilot.pause()
-        assert switcher.current == "workspace-office"
+        assert switcher.current == "workspace-mcp"
 
 
 def test_fresh_and_startup_flows_choose_expected_initial_view() -> None:
@@ -216,21 +222,6 @@ def test_fresh_and_startup_flows_choose_expected_initial_view() -> None:
     assert teleporting._workspace_view is WorkspaceView.CHAT
 
 
-def test_fresh_home_reports_initialization_until_core_is_ready(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    app = build_test_vibe_app(startup=StartupOptions())
-    initialized = False
-    monkeypatch.setattr(
-        type(app.agent_loop), "is_initialized", property(lambda _loop: initialized)
-    )
-
-    assert app._workspace_system_summary() == "System initializing"
-
-    initialized = True
-    assert app._workspace_system_summary() == "System ready"
-
-
 def test_navigation_bindings_are_labeled_and_chat_mode_key_is_input_scoped() -> None:
     bindings = {
         binding.key: binding
@@ -238,16 +229,8 @@ def test_navigation_bindings_are_labeled_and_chat_mode_key_is_input_scoped() -> 
         if isinstance(binding, Binding)
     }
 
-    assert set(bindings) >= {
-        "ctrl+1",
-        "ctrl+2",
-        "ctrl+3",
-        "ctrl+4",
-        "ctrl+5",
-        "ctrl+6",
-        "ctrl+7",
-    }
-    assert all(bindings[f"ctrl+{index}"].show for index in range(1, 8))
+    assert set(bindings) >= {"ctrl+1", "ctrl+2", "ctrl+3", "ctrl+4", "ctrl+5"}
+    assert all(bindings[f"ctrl+{index}"].show for index in range(1, 6))
     assert "shift+tab" not in bindings
     assert any(binding.key == "shift+tab" for binding in ChatTextArea.BINDINGS)
 
@@ -280,7 +263,7 @@ async def test_workspace_default_pages_fit_initial_viewport(
 
     async with app.run_test(size=size) as pilot:
         await pilot.pause()
-        for view in WorkspaceView:
+        for view in VISIBLE_WORKSPACE_VIEWS:
             app.action_show_workspace(view.value)
             await pilot.pause()
             page = app.query_one(f"#workspace-{view.value}")
@@ -289,30 +272,16 @@ async def test_workspace_default_pages_fit_initial_viewport(
 
             match view:
                 case WorkspaceView.HOME:
-                    action = page.query_one("#home-action-needed", NavigableOptionList)
-                    assert str(action.get_option_at_index(0).prompt) == "✓ Clear"
-                    assert "Ready" in str(
-                        page.query_one("#home-system", Static).render()
-                    )
-                    activity = page.query_one("#home-activity-list")
-                    assert activity.region.bottom <= page.region.bottom
+                    summary = page.query_one("#office-summary", Static)
+                    assert "0 active" in str(summary.render())
+                    grid = page.query_one("#office-agent-grid")
+                    assert grid.region.bottom <= page.region.bottom
                 case WorkspaceView.CHAT:
                     assert page.query_one("#chat").region.height > 0
                     assert (
                         page.query_one("#input-container").region.bottom
                         <= page.region.bottom
                     )
-                case WorkspaceView.OFFICE:
-                    assert "0 active" in str(
-                        app
-                        .query_one(OfficePage)
-                        .query_one("#office-summary", Static)
-                        .render()
-                    )
-                case WorkspaceView.AGENTS:
-                    detail = page.query_one("#agent-detail")
-                    assert detail.region.height > 0
-                    assert detail.region.bottom <= page.region.bottom
                 case WorkspaceView.MCP:
                     options = page.query_one("#mcp-options")
                     assert options.region.height >= page.region.height // 2
@@ -347,39 +316,35 @@ async def test_activity_event_precedes_handler_and_refreshes_home() -> None:
         await app._handle_injected_context_event(event)
         await pilot.pause()
 
-        activity_text = app.query_one(HomePage).query_one("#home-activity-list", Static)
-        assert "inspect workspace" in str(activity_text.render())
+        home = app.query_one(HomePage)
+        assert any(
+            activity.task == "inspect workspace"
+            for activity in home._view.snapshot.activities
+        )
+        task_card = next(
+            card
+            for card in home.query(AgentStateCard)
+            if card.activity.task == "inspect workspace"
+        )
+        assert "inspect workspace" in str(
+            task_card.query_one(".agent-card-task").render()
+        )
 
     assert observed_before_handler == [True]
 
 
 @pytest.mark.asyncio
-async def test_agents_page_routes_only_primary_agent_selection(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_legacy_office_and_agents_destinations_open_home() -> None:
     app = build_test_vibe_app()
-    requested: list[str] = []
-    monkeypatch.setattr(app, "_request_agent", requested.append)
 
-    async with app.run_test() as pilot:
+    async with app.run_test():
+        app._show_workspace(WorkspaceView.OFFICE)
+        assert app._workspace_view is WorkspaceView.HOME
+        assert app.query_one(ContentSwitcher).current == "workspace-home"
+
         app._show_workspace(WorkspaceView.AGENTS)
-        page = app.query_one(AgentsPage)
-        options = page.query_one("#agents-list", NavigableOptionList)
-
-        options.highlighted = options.get_option_index("plan")
-        options.action_select()
-        await pilot.pause()
-        assert requested == ["plan"]
-
-        options.highlighted = options.get_option_index("orchestrator")
-        options.action_select()
-        await pilot.pause()
-        assert requested == ["plan", "orchestrator"]
-
-        options.highlighted = options.get_option_index("explore")
-        options.action_select()
-        await pilot.pause()
-        assert requested == ["plan", "orchestrator"]
+        assert app._workspace_view is WorkspaceView.HOME
+        assert app.query_one(ContentSwitcher).current == "workspace-home"
 
 
 @pytest.mark.asyncio
@@ -589,8 +554,9 @@ async def test_manual_compaction_reports_running_then_idle_and_rebinds_session(
         running = app._activity_store.snapshot.activities[0]
         assert app._agent_running is True
         assert running.state is AgentRunState.RUNNING
-        assert "running" in str(
-            app.query_one(HomePage).query_one("#home-activity-list", Static).render()
+        assert (
+            app.query_one(HomePage)._view.snapshot.activities[0].state
+            is AgentRunState.RUNNING
         )
 
         release.set()
@@ -605,9 +571,9 @@ async def test_manual_compaction_reports_running_then_idle_and_rebinds_session(
         assert [item.tool_call_id for item in snapshot.activities] == [
             "primary:compact-session"
         ]
-        office_snapshot = app.query_one(OfficePage)._view.snapshot
-        assert office_snapshot.session_id == "compact-session"
-        assert office_snapshot.activities[0].state is AgentRunState.IDLE
+        home_snapshot = app.query_one(HomePage)._view.snapshot
+        assert home_snapshot.session_id == "compact-session"
+        assert home_snapshot.activities[0].state is AgentRunState.IDLE
 
 
 @pytest.mark.asyncio

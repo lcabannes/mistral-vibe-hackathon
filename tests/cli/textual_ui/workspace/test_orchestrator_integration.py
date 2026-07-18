@@ -18,7 +18,7 @@ from tests.stubs.fake_backend import FakeBackend
 import vibe.cli.textual_ui.app as app_module
 from vibe.cli.textual_ui.widgets.approval_app import ApprovalApp
 from vibe.cli.textual_ui.workspace.models import AgentRunState, WorkspaceView
-from vibe.cli.textual_ui.workspace.pages import HomePage, OfficePage
+from vibe.cli.textual_ui.workspace.pages import HomePage
 from vibe.core.agents.events import (
     ManagedAgentCallbackContext,
     ManagedAgentLifecycleEvent,
@@ -110,7 +110,7 @@ async def test_successful_turn_applies_each_deferred_control(
         )
         monkeypatch.setattr(app.agent_loop, "act", _deferred_turn(app, navigation))
         await app._handle_agent_loop_turn("apply navigation")
-        assert app._workspace_view is WorkspaceView.OFFICE
+        assert app._workspace_view is WorkspaceView.HOME
 
 
 @pytest.mark.asyncio
@@ -257,7 +257,7 @@ async def test_orchestrate_handler_switches_primary_profile(
 
 
 @pytest.mark.asyncio
-async def test_managed_event_consumer_updates_home_office_and_shuts_down(
+async def test_managed_event_consumer_updates_home_and_shuts_down(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app = build_test_vibe_app()
@@ -286,11 +286,6 @@ async def test_managed_event_consumer_updates_home_office_and_shuts_down(
             item.managed_agent_id == "worker-1"
             for item in app.query_one(HomePage)._view.snapshot.activities
         )
-        assert any(
-            item.managed_agent_id == "worker-1"
-            for item in app.query_one(OfficePage)._view.snapshot.activities
-        )
-
         await app._stop_managed_agent_events()
         await asyncio.wait_for(closed.wait(), timeout=1)
         assert app._managed_agent_events_task is None

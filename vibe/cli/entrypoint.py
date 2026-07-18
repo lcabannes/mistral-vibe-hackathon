@@ -16,6 +16,8 @@ from vibe import __version__
 if TYPE_CHECKING:
     from vibe.core.worktree import PreparedWorktree, WorktreeCleanupState
 
+_MAX_PORT = 65535
+
 
 def parse_arguments() -> argparse.Namespace:
     if len(sys.argv) > 1 and sys.argv[1] == "team":
@@ -117,6 +119,25 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument("--setup", action="store_true", help="Setup API key and exit")
     parser.add_argument(
+        "--server",
+        action="store_true",
+        help="Run the shared Agent Room backend for this workdir and exit with it",
+    )
+    parser.add_argument(
+        "--server-port",
+        type=_server_port,
+        default=4173,
+        metavar="PORT",
+        help="Loopback port used by --server (default: 4173)",
+    )
+    parser.add_argument(
+        "--server-network-mode",
+        choices=("auto", "inherit", "direct"),
+        default="auto",
+        metavar="MODE",
+        help="Worker proxy policy used by --server (default: auto)",
+    )
+    parser.add_argument(
         "--check-upgrade",
         action="store_true",
         help="Check for a Vibe update now, prompt to install it, and exit",
@@ -173,6 +194,15 @@ def parse_arguments() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _server_port(value: str) -> int:
+    port = int(value)
+    if not 1 <= port <= _MAX_PORT:
+        raise argparse.ArgumentTypeError(
+            f"server port must be between 1 and {_MAX_PORT}"
+        )
+    return port
+
+
 def _parse_team_arguments(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog=f"{Path(sys.argv[0]).name} team",
@@ -215,6 +245,7 @@ def _parse_team_arguments(argv: list[str]) -> argparse.Namespace:
         check_upgrade=False,
         add_dir=[],
         prompt=None,
+        server=False,
     )
     return parser.parse_args(argv)
 
@@ -331,6 +362,15 @@ def _cleanup_worktree_on_exit(worktree: PreparedWorktree) -> None:
         rprint(f"[dim]Kept branch: {worktree.branch}[/]", file=sys.stderr)
 
 
+def _change_to_requested_workdir(args: argparse.Namespace) -> None:
+    if args.workdir is None:
+        return
+    workdir = args.workdir.expanduser().resolve()
+    if not workdir.is_dir():
+        raise SystemExit(f"--workdir does not exist or is not a directory: {workdir}")
+    os.chdir(workdir)
+
+
 def main() -> None:
     from vibe.core.utils.windows_asyncio import (
         silence_proactor_transport_teardown_warnings,
@@ -346,14 +386,10 @@ def main() -> None:
     from vibe.core.config.harness_files import init_harness_files_manager
     from vibe.core.trusted_folders import trusted_folders_manager
 
-    if args.workdir:
-        workdir = args.workdir.expanduser().resolve()
-        if not workdir.is_dir():
-            rprint(
-                f"[red]Error: --workdir does not exist or is not a directory: {workdir}[/]"
-            )
-            sys.exit(1)
-        os.chdir(workdir)
+    _change_to_requested_workdir(args)
+
+    if _run_agent_room_server_if_requested(args):
+        return
 
     # Must run before `cwd` is read and before run_cli so that session lookups
     # (-c / --resume picker) scope to the worktree directory.
@@ -414,6 +450,42 @@ def main() -> None:
         resolve_trusted_folder = _resolve_trusted_folder
 
     _run_cli_with_worktree_cleanup(args, worktree_session, resolve_trusted_folder)
+
+
+def _run_agent_room_server(
+    workdir: Path, *, port: int = 4173, network_mode: str = "auto"
+) -> None:
+    server = Path(__file__).resolve().parents[2] / "web" / "agent-room" / "server.py"
+    if not server.is_file():
+        raise SystemExit(
+            "Agent Room server is unavailable. Run --server from the hackathon "
+            "source checkout."
+        )
+    command = [
+        sys.executable,
+        str(server),
+        "--port",
+        str(port),
+        "--workdir",
+        str(workdir.resolve()),
+        "--network-mode",
+        network_mode,
+    ]
+    try:
+        os.execv(sys.executable, command)
+    except OSError as error:
+        raise SystemExit(f"Could not start Agent Room server: {error}") from error
+
+
+def _run_agent_room_server_if_requested(args: argparse.Namespace) -> bool:
+    if not args.server:
+        return False
+    if args.worktree:
+        raise SystemExit("--server cannot be combined with --worktree")
+    _run_agent_room_server(
+        Path.cwd(), port=args.server_port, network_mode=args.server_network_mode
+    )
+    return True
 
 
 def _run_cli_with_worktree_cleanup(

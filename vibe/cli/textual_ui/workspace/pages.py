@@ -438,6 +438,10 @@ class AgentStateCard(Vertical):
     AgentStateCard:focus {
         background: $primary 12%;
     }
+
+    AgentStateCard.selected {
+        background: $primary 18%;
+    }
     """
 
     class InspectRequested(Message):
@@ -487,44 +491,44 @@ class AgentStateCard(Vertical):
         self.post_message(self.InspectRequested(self.activity))
 
 
-class HomePage(ResponsiveWorkspacePage):
+class ActivityOverviewPage(ResponsiveWorkspacePage):
     DEFAULT_CSS = """
-    HomePage {
+    ActivityOverviewPage {
         layout: grid;
         grid-size: 1;
         grid-columns: 1fr;
         grid-rows: 2 6 1fr;
     }
 
-    HomePage .home-summary-row {
+    ActivityOverviewPage .home-summary-row {
         width: 1fr;
         height: 6;
         layout: horizontal;
         margin-bottom: 1;
     }
 
-    HomePage .home-summary {
+    ActivityOverviewPage .home-summary {
         width: 1fr;
         height: 5;
         padding: 0 1;
         border-left: solid $foreground-muted;
     }
 
-    HomePage .home-summary .workspace-section-title {
+    ActivityOverviewPage .home-summary .workspace-section-title {
         margin-bottom: 0;
     }
 
-    HomePage.narrow .home-summary {
+    ActivityOverviewPage.narrow .home-summary {
         padding: 0 0 0 1;
     }
 
-    HomePage #home-activity {
+    ActivityOverviewPage #home-activity {
         width: 1fr;
         height: 1fr;
         min-height: 0;
     }
 
-    HomePage #home-activity-list {
+    ActivityOverviewPage #home-activity-list {
         width: 1fr;
         height: 1fr;
         overflow-y: auto;
@@ -532,7 +536,7 @@ class HomePage(ResponsiveWorkspacePage):
         text-overflow: ellipsis;
     }
 
-    HomePage #home-action-needed {
+    ActivityOverviewPage #home-action-needed {
         width: 1fr;
         height: 1fr;
         min-height: 0;
@@ -544,22 +548,22 @@ class HomePage(ResponsiveWorkspacePage):
         text-overflow: ellipsis;
     }
 
-    HomePage #home-action-needed.action-clear {
+    ActivityOverviewPage #home-action-needed.action-clear {
         color: $foreground;
     }
 
-    HomePage #home-action-needed > .option-list--option-highlighted {
+    ActivityOverviewPage #home-action-needed > .option-list--option-highlighted {
         color: $foreground;
         background: $error 18%;
         text-style: bold;
     }
 
-    HomePage #home-action-needed.action-clear
+    ActivityOverviewPage #home-action-needed.action-clear
         > .option-list--option-highlighted {
         background: $success 18%;
     }
 
-    HomePage #home-system {
+    ActivityOverviewPage #home-system {
         color: $foreground;
     }
     """
@@ -713,7 +717,7 @@ class ChatPage(ResponsiveWorkspacePage):
         yield self._content
 
 
-class OfficePage(ResponsiveWorkspacePage):
+class HomePage(ResponsiveWorkspacePage):
     class AgentMessageSubmitted(Message):
         def __init__(self, agent_id: str, content: str) -> None:
             super().__init__()
@@ -752,24 +756,34 @@ class OfficePage(ResponsiveWorkspacePage):
             self.answers = answers
 
     DEFAULT_CSS = """
-    OfficePage {
+    HomePage {
         layout: grid;
         grid-size: 1;
         grid-columns: 1fr;
-        grid-rows: 2 2 1fr auto 3;
+        grid-rows: 2 2 1fr 3;
     }
 
-    OfficePage #office-agent-grid {
+    HomePage #office-body {
         width: 1fr;
         height: 1fr;
+        min-height: 0;
+        layout: horizontal;
+    }
+
+    HomePage #office-agent-grid {
+        width: 38;
+        height: 1fr;
+        min-height: 0;
         layout: grid;
-        grid-size: 3;
-        grid-columns: 1fr 1fr 1fr;
-        grid-gutter: 1 2;
+        grid-size: 1;
+        grid-columns: 1fr;
+        grid-rows: 5;
+        grid-gutter: 0;
+        padding-right: 1;
         overflow-y: auto;
     }
 
-    OfficePage #office-empty {
+    HomePage #office-empty {
         width: 1fr;
         height: 2;
         padding: 0 1;
@@ -780,18 +794,22 @@ class OfficePage(ResponsiveWorkspacePage):
         }
     }
 
-    OfficePage.medium #office-agent-grid {
-        grid-size: 2;
-        grid-columns: 1fr 1fr;
+    HomePage.medium #office-agent-grid {
+        width: 34;
     }
 
-    OfficePage.narrow #office-agent-grid {
-        grid-size: 1;
-        grid-columns: 1fr;
-        grid-gutter: 0;
+    HomePage.narrow #office-body {
+        layout: vertical;
     }
 
-    OfficePage #office-summary {
+    HomePage.narrow #office-agent-grid {
+        width: 1fr;
+        height: 10;
+        padding-right: 0;
+        margin-bottom: 1;
+    }
+
+    HomePage #office-summary {
         height: 2;
         color: $text-muted;
 
@@ -800,38 +818,42 @@ class OfficePage(ResponsiveWorkspacePage):
         }
     }
 
-    OfficePage #office-detail {
+    HomePage #office-detail {
         width: 1fr;
-        height: 10;
-        max-height: 35%;
-        padding: 1 0 0 0;
-        border-top: solid $foreground-muted;
+        height: 1fr;
+        min-height: 0;
+        padding: 0 0 0 1;
+        border-left: solid $foreground-muted;
         overflow-y: auto;
     }
 
-    OfficePage #office-detail-content {
+    HomePage #office-detail-content {
         width: 1fr;
         height: auto;
     }
 
-    OfficePage.narrow #office-detail {
-        height: 8;
-        max-height: 40%;
+    HomePage.narrow #office-detail {
+        width: 1fr;
+        height: 1fr;
+        min-height: 0;
+        padding: 1 0 0 0;
+        border-left: none;
+        border-top: solid $foreground-muted;
     }
 
-    OfficePage #office-agent-actions {
+    HomePage #office-agent-actions {
         width: 1fr;
         height: 3;
         layout: horizontal;
         padding-top: 1;
     }
 
-    OfficePage #office-agent-command {
+    HomePage #office-agent-command {
         width: 1fr;
         height: 2;
     }
 
-    OfficePage #office-agent-actions Button {
+    HomePage #office-agent-actions Button {
         min-width: 8;
         height: 2;
         margin-left: 1;
@@ -841,18 +863,25 @@ class OfficePage(ResponsiveWorkspacePage):
     def __init__(self, view: OfficeViewModel, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._view = view
-        self._inspected_id: str | None = None
+        self._inspected_id = (
+            view.snapshot.activities[0].activity_id
+            if view.snapshot.activities
+            else None
+        )
 
     def compose(self) -> ComposeResult:
-        yield Static("Office", classes="workspace-title")
+        yield Static("Home", classes="workspace-title")
         yield Static(self._summary_text(), id="office-summary")
-        with Container(id="office-agent-grid"):
-            yield from self._cards()
-            if not self._view.snapshot.activities:
-                yield Static("○ No agent runs in this session", id="office-empty")
-        detail = VerticalScroll(Static(id="office-detail-content"), id="office-detail")
-        detail.display = False
-        yield detail
+        with Horizontal(id="office-body"):
+            with Container(id="office-agent-grid"):
+                yield from self._cards()
+                if not self._view.snapshot.activities:
+                    yield Static("○ No agent runs in this session", id="office-empty")
+            detail = VerticalScroll(
+                Static(id="office-detail-content"), id="office-detail"
+            )
+            detail.display = self._inspected_id is not None
+            yield detail
         with Horizontal(id="office-agent-actions"):
             yield Input(placeholder="Task for a new agent", id="office-agent-command")
             yield Button("New agent", id="office-agent-create", variant="primary")
@@ -874,6 +903,15 @@ class OfficePage(ResponsiveWorkspacePage):
 
     def update_view(self, view: OfficeViewModel) -> None:
         self._view = view
+        activity_ids = {
+            activity.activity_id for activity in self._view.snapshot.activities
+        }
+        if self._inspected_id not in activity_ids:
+            self._inspected_id = (
+                self._view.snapshot.activities[0].activity_id
+                if self._view.snapshot.activities
+                else None
+            )
         if not self.is_mounted:
             return
         self.query_one("#office-summary", Static).update(self._summary_text())
@@ -885,13 +923,6 @@ class OfficePage(ResponsiveWorkspacePage):
     ) -> None:
         message.stop()
         self.inspect(message.activity)
-
-    def on_key(self, event: events.Key) -> None:
-        if event.key != "escape" or self._inspected_id is None:
-            return
-        event.stop()
-        self._inspected_id = None
-        self._refresh_detail()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id != "office-agent-command":
@@ -934,12 +965,19 @@ class OfficePage(ResponsiveWorkspacePage):
     def inspect(self, activity: AgentActivity) -> None:
         self._inspected_id = activity.activity_id
         self._refresh_detail()
+        for card in self.query(AgentStateCard):
+            card.set_class(card.activity.activity_id == self._inspected_id, "selected")
+        self.query_one("#office-detail", VerticalScroll).scroll_home(animate=False)
 
     def _cards(self) -> tuple[AgentStateCard, ...]:
-        return tuple(
-            AgentStateCard(activity, id=_activity_widget_id(activity.activity_id))
-            for activity in self._view.snapshot.activities
-        )
+        cards: list[AgentStateCard] = []
+        for activity in self._view.snapshot.activities:
+            card = AgentStateCard(
+                activity, id=_activity_widget_id(activity.activity_id)
+            )
+            card.set_class(activity.activity_id == self._inspected_id, "selected")
+            cards.append(card)
+        return tuple(cards)
 
     def _refresh_cards(self) -> None:
         grid = self.query_one("#office-agent-grid", Container)
@@ -958,12 +996,13 @@ class OfficePage(ResponsiveWorkspacePage):
         for activity in self._view.snapshot.activities:
             if card := existing.get(activity.activity_id):
                 card.update_activity(activity)
+                card.set_class(activity.activity_id == self._inspected_id, "selected")
             else:
-                grid.mount(
-                    AgentStateCard(
-                        activity, id=_activity_widget_id(activity.activity_id)
-                    )
+                card = AgentStateCard(
+                    activity, id=_activity_widget_id(activity.activity_id)
                 )
+                card.set_class(activity.activity_id == self._inspected_id, "selected")
+                grid.mount(card)
         if not desired_ids and not grid.query("#office-empty"):
             grid.mount(Static("○ No agent runs in this session", id="office-empty"))
 
@@ -1106,11 +1145,12 @@ class OfficePage(ResponsiveWorkspacePage):
         if activity.group_id:
             text.append(f"\nGroup   {activity.group_id}")
         text.append(f"\nState   {_state_presentation(activity.state)[1]}")
-        OfficePage._append_run_metrics(text, activity)
-        OfficePage._append_pending_interactions(text, activity)
+        HomePage._append_pending_interactions(text, activity)
         if activity.error:
             text.append(f"\n\nError\n{activity.error}", style="bold")
-        OfficePage._append_conversation(text, activity)
+        HomePage._append_conversation(text, activity)
+        text.append("\n\nRun details", style="bold")
+        HomePage._append_run_metrics(text, activity)
         return text
 
     @staticmethod
@@ -1135,14 +1175,14 @@ class OfficePage(ResponsiveWorkspacePage):
 
     @staticmethod
     def _append_pending_interactions(text: Text, activity: AgentActivity) -> None:
-        approval = OfficePage._pending_interaction(activity, "approvals")
+        approval = HomePage._pending_interaction(activity, "approvals")
         if approval is not None:
             text.append("\n\nApproval required", style="bold")
             text.append(f"\n{approval.get('tool_name') or 'Tool call'}")
             arguments = approval.get("arguments")
             if arguments:
                 text.append(f"\n{arguments}", style="dim")
-        question = OfficePage._pending_interaction(activity, "questions")
+        question = HomePage._pending_interaction(activity, "questions")
         if question is not None:
             text.append("\n\nAgent question", style="bold")
             prompts = question.get("questions")
@@ -1153,18 +1193,24 @@ class OfficePage(ResponsiveWorkspacePage):
 
     @staticmethod
     def _append_conversation(text: Text, activity: AgentActivity) -> None:
+        text.append("\n\nConversation", style="bold")
         if activity.conversation:
-            text.append("\n\nConversation", style="bold")
-            for message in activity.conversation[-12:]:
-                label = "You" if message.role == "user" else "Agent"
+            labels = {
+                "user": "You",
+                "assistant": "Agent",
+                "system": "System",
+                "tool": "Tool",
+            }
+            for message in activity.conversation:
+                label = labels.get(message.role, message.role.title())
                 text.append(f"\n\n{label}  ", style="bold")
                 text.append(message.content)
                 if message.status not in {"succeeded", "completed"}:
                     text.append(f"  [{message.status}]", style="dim")
         elif activity.last_response:
-            text.append(f"\n\nOutput\n{activity.last_response}")
+            text.append(f"\n\nAgent  {activity.last_response}")
         elif activity.is_managed:
-            text.append("\n\nNo output yet", style="dim")
+            text.append("\n\nNo messages yet", style="dim")
 
     def _summary_text(self) -> str:
         activities = self._view.snapshot.activities
@@ -1508,6 +1554,7 @@ class UsagePage(ResponsiveWorkspacePage):
 
 
 __all__ = [
+    "ActivityOverviewPage",
     "AgentProfileViewModel",
     "AgentStateCard",
     "AgentStateRow",
@@ -1518,7 +1565,6 @@ __all__ = [
     "HomePage",
     "HomeViewModel",
     "MCPPage",
-    "OfficePage",
     "OfficeViewModel",
     "ResponsiveWorkspacePage",
     "UsagePage",

@@ -26,7 +26,7 @@ Mistral Vibe is a command-line coding assistant powered by Mistral's models. It 
 
 ## Hackathon Agent Room quick start
 
-This fork adds the browser Agent Room and the matching Textual **Office** view.
+This fork adds the browser Agent Room and the matching Textual **Home** view.
 Both are clients of one local backend, so they show the same real agents,
 conversations, queues, approvals, questions, token usage, cost, worktrees, and
 lifecycle state. Install this repository from source; the released
@@ -63,27 +63,28 @@ uv run --no-dev vibe --setup
 From the repository checkout, run this in terminal 1 and leave it running:
 
 ```bash
-uv run --no-dev python web/agent-room/server.py \
-  --workdir "$PWD" \
-  --network-mode auto
+uv run --no-dev vibe --server
 ```
 
 Open <http://127.0.0.1:4173/web/agent-room/>. `auto` is the recommended
 network mode: it keeps a working proxy and bypasses an inherited proxy that
-rejects Mistral API traffic. Use `--network-mode direct` to always bypass
-shell proxy settings, or `--network-mode inherit` to always keep them.
+rejects Mistral API traffic. Pass `--server-network-mode direct` to always
+bypass shell proxy settings, or `--server-network-mode inherit` to always keep
+them. Use `--server-port PORT` to select another loopback port.
 
 ### 3. Start the synced CLI
 
 Run this in terminal 2 from the same checkout:
 
 ```bash
-VIBE_AGENT_ROOM_URL=http://127.0.0.1:4173 \
-VIBE_AGENT_ROOM_AUTOSTART=0 \
 uv run --no-dev vibe
 ```
 
-Press `Ctrl+3` to open **Office**. Select any agent to compare its conversation
+The CLI discovers the backend started by `--server` through `~/.vibe`. When a
+custom port is used, set `VIBE_AGENT_ROOM_URL`, for example
+`VIBE_AGENT_ROOM_URL=http://127.0.0.1:4183 uv run --no-dev vibe`.
+
+Press `Ctrl+1` to open **Home**. Select any agent to compare its conversation
 and status with the webpage, send another message, cancel or stop work, resolve
 approvals, or answer questions. Stopped and failed agents remain selectable;
 sending a message resumes the same session and worktree.
@@ -95,7 +96,7 @@ page at <http://127.0.0.1:4173/web/agent-room/> or stop that process first.
 ## Upstream CLI installation (without hackathon features)
 
 The commands below install Mistral's released CLI. Use the source installation
-above when you need Agent Room or the synchronized Office view.
+above when you need Agent Room or the synchronized Home view.
 
 **Linux and macOS**
 

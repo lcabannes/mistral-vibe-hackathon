@@ -58,6 +58,7 @@ class BaseSnapshotTestApp(VibeApp):
                 )
             ),
         )
+        kwargs.setdefault("agent_room_client", False)
 
         super().__init__(
             agent_loop=agent_loop,

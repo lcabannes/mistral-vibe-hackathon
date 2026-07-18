@@ -162,15 +162,14 @@ from vibe.cli.textual_ui.workspace import (
 )
 from vibe.cli.textual_ui.workspace.cli_control import TextualCLIControl
 from vibe.cli.textual_ui.workspace.coworkers import CoworkersPage, CoworkersViewModel
-from vibe.cli.textual_ui.workspace.navigation import WorkspaceNavigation
+from vibe.cli.textual_ui.workspace.navigation import (
+    VISIBLE_WORKSPACE_VIEWS,
+    WorkspaceNavigation,
+)
 from vibe.cli.textual_ui.workspace.pages import (
-    AgentsPage,
-    AgentsViewModel,
     ChatPage,
     HomePage,
-    HomeViewModel,
     MCPPage,
-    OfficePage,
     OfficeViewModel,
     UsagePage,
     UsageViewModel,
@@ -178,7 +177,6 @@ from vibe.cli.textual_ui.workspace.pages import (
 from vibe.cli.textual_ui.workspace.team_presenter import (
     coworkers_view,
     team_activity_snapshot,
-    team_sync_summary,
 )
 from vibe.cli.update_notifier import (
     PyPIUpdateGateway,
@@ -546,11 +544,9 @@ class VibeApp(App):  # noqa: PLR0904
         Binding("ctrl+backslash", "toggle_debug_console", "Debug Console", show=False),
         Binding("ctrl+1", "show_workspace('home')", "Home"),
         Binding("ctrl+2", "show_workspace('chat')", "Chat"),
-        Binding("ctrl+3", "show_workspace('office')", "Office"),
-        Binding("ctrl+4", "show_workspace('agents')", "Agents"),
-        Binding("ctrl+5", "show_workspace('mcp')", "MCP Manager"),
-        Binding("ctrl+6", "show_workspace('usage')", "Usage"),
-        Binding("ctrl+7", "show_workspace('coworkers')", "Coworkers"),
+        Binding("ctrl+3", "show_workspace('mcp')", "MCP Manager"),
+        Binding("ctrl+4", "show_workspace('usage')", "Usage"),
+        Binding("ctrl+5", "show_workspace('coworkers')", "Coworkers"),
     ]
 
     def get_driver_class(self) -> type[Driver]:
@@ -987,14 +983,6 @@ class VibeApp(App):  # noqa: PLR0904
                 yield ChatPage(
                     chat_content, id=self._workspace_page_id(WorkspaceView.CHAT)
                 )
-                yield OfficePage(
-                    self._office_view_model(snapshot),
-                    id=self._workspace_page_id(WorkspaceView.OFFICE),
-                )
-                yield AgentsPage(
-                    self._agents_view_model(),
-                    id=self._workspace_page_id(WorkspaceView.AGENTS),
-                )
                 yield MCPPage(mcp_app, id=self._workspace_page_id(WorkspaceView.MCP))
                 yield UsagePage(
                     UsageViewModel.from_stats(self.agent_loop.stats),
@@ -1009,25 +997,6 @@ class VibeApp(App):  # noqa: PLR0904
     def _workspace_page_id(view: WorkspaceView) -> str:
         return f"workspace-{view.value}"
 
-    def _workspace_system_summary(self) -> str:
-        if self._agent_room_connected and self._agent_room_snapshot is not None:
-            activities = self._agent_room_snapshot.activities
-            live = sum(run.runtime_live for run in activities)
-            return f"Agent Room connected · {live} live"
-        if self._fatal_init_error:
-            return "System unavailable"
-        if not self.agent_loop.is_initialized:
-            return "System initializing"
-        connector_registry = self.agent_loop.connector_registry
-        connector_count = (
-            connector_registry.connector_count if connector_registry else 0
-        )
-        source_count = len(self.config.mcp_servers) + connector_count
-        if source_count == 0:
-            return "System ready"
-        noun = "source" if source_count == 1 else "sources"
-        return f"System ready · {source_count} MCP {noun}"
-
     def _workspace_activity_snapshot(self) -> AgentActivitySnapshot:
         if self._agent_room_connected and self._agent_room_snapshot is not None:
             return self._agent_room_activity_snapshot(self._agent_room_snapshot)
@@ -1037,18 +1006,6 @@ class VibeApp(App):  # noqa: PLR0904
         return self._activity_store.snapshot
 
     def _home_view_model(
-        self, snapshot: AgentActivitySnapshot | None = None
-    ) -> HomeViewModel:
-        service = self._team_workspace_service
-        return HomeViewModel(
-            snapshot or self._workspace_activity_snapshot(),
-            self._workspace_system_summary(),
-            team_sync_summary(service.snapshot)
-            if service is not None and service.enabled
-            else None,
-        )
-
-    def _office_view_model(
         self, snapshot: AgentActivitySnapshot | None = None
     ) -> OfficeViewModel:
         if self._agent_room_connected and self._agent_room_snapshot is not None:
@@ -1218,10 +1175,6 @@ class VibeApp(App):  # noqa: PLR0904
         service.remove_listener(self._refresh_team_workspace_pages)
         with suppress(TimeoutError):
             await asyncio.wait_for(service.stop(), timeout=3.0)
-
-    def _agents_view_model(self) -> AgentsViewModel:
-        profiles = tuple(self.agent_loop.agent_manager.available_agents.values())
-        return AgentsViewModel.from_profiles(profiles)
 
     @staticmethod
     def _team_activity_summary(
@@ -1403,22 +1356,12 @@ class VibeApp(App):  # noqa: PLR0904
             else snapshot
         )
         self.query_one(HomePage).update_view(self._home_view_model(workspace_snapshot))
-        self.query_one(OfficePage).update_view(
-            self._office_view_model(workspace_snapshot)
-        )
 
     def _refresh_team_workspace_pages(self, snapshot: TeamWorkspaceSnapshot) -> None:
         if not self.screen_stack:
             return
         activity_snapshot = team_activity_snapshot(snapshot)
         self.query_one(HomePage).update_view(
-            HomeViewModel(
-                activity_snapshot,
-                self._workspace_system_summary(),
-                team_sync_summary(snapshot),
-            )
-        )
-        self.query_one(OfficePage).update_view(
             OfficeViewModel(activity_snapshot, snapshot.identity.display_name)
         )
         self.query_one(CoworkersPage).update_view(coworkers_view(snapshot))
@@ -1427,7 +1370,6 @@ class VibeApp(App):  # noqa: PLR0904
         if not self.screen_stack:
             return
         self._refresh_activity_pages(self._activity_store.snapshot)
-        self.query_one(AgentsPage).update_view(self._agents_view_model())
         self.query_one(CoworkersPage).update_view(self._coworkers_view_model())
         self.query_one(UsagePage).update_view(
             UsageViewModel.from_stats(self.agent_loop.stats)
@@ -1468,6 +1410,8 @@ class VibeApp(App):  # noqa: PLR0904
         )
 
     def _show_workspace(self, view: WorkspaceView, *, focus: bool = True) -> None:
+        if view in {WorkspaceView.OFFICE, WorkspaceView.AGENTS}:
+            view = WorkspaceView.HOME
         if self._required_interaction_pending() and view is not WorkspaceView.CHAT:
             view = WorkspaceView.CHAT
         self._workspace_view = view
@@ -1480,10 +1424,8 @@ class VibeApp(App):  # noqa: PLR0904
         )
         if self._chat_input_container and self._current_bottom_app is BottomApp.Input:
             self._chat_input_container.disabled = view is not WorkspaceView.CHAT
-        if view in {WorkspaceView.HOME, WorkspaceView.OFFICE}:
+        if view is WorkspaceView.HOME:
             self._refresh_activity_pages(self._workspace_activity_snapshot())
-        elif view is WorkspaceView.AGENTS:
-            self.query_one(AgentsPage).update_view(self._agents_view_model())
         elif view is WorkspaceView.COWORKERS:
             self.query_one(CoworkersPage).update_view(self._coworkers_view_model())
         elif view is WorkspaceView.USAGE:
@@ -1497,8 +1439,6 @@ class VibeApp(App):  # noqa: PLR0904
         match self._workspace_view:
             case WorkspaceView.CHAT:
                 self._focus_current_bottom_app()
-            case WorkspaceView.AGENTS:
-                self.query_one(AgentsPage).query_one("#agents-list").focus()
             case WorkspaceView.COWORKERS:
                 self.query_one(CoworkersPage).focus_roster()
             case WorkspaceView.MCP:
@@ -1529,22 +1469,8 @@ class VibeApp(App):  # noqa: PLR0904
     ) -> None:
         self._show_workspace(message.view)
 
-    def on_agents_page_agent_selected(self, message: AgentsPage.AgentSelected) -> None:
-        if message.profile.agent_type != AgentType.AGENT.value:
-            return
-        self._request_agent(message.profile.name)
-
-    def on_home_page_attention_selected(
-        self, message: HomePage.AttentionSelected
-    ) -> None:
-        if self._required_interaction_pending() or not message.activity.is_managed:
-            self._show_workspace(WorkspaceView.CHAT)
-            return
-        self._show_workspace(WorkspaceView.OFFICE)
-        self.query_one(OfficePage).inspect(message.activity)
-
-    async def on_office_page_agent_message_submitted(
-        self, message: OfficePage.AgentMessageSubmitted
+    async def on_home_page_agent_message_submitted(
+        self, message: HomePage.AgentMessageSubmitted
     ) -> None:
         client = self._agent_room_client
         if client is None or not self._agent_room_connected:
@@ -1555,8 +1481,8 @@ class VibeApp(App):  # noqa: PLR0904
         except (AgentRoomUnavailable, ValueError) as error:
             self.notify(str(error), severity="error")
 
-    async def on_office_page_agent_create_requested(
-        self, message: OfficePage.AgentCreateRequested
+    async def on_home_page_agent_create_requested(
+        self, message: HomePage.AgentCreateRequested
     ) -> None:
         client = self._agent_room_client
         if client is None or not self._agent_room_connected:
@@ -1576,10 +1502,10 @@ class VibeApp(App):  # noqa: PLR0904
             None,
         )
         if activity is not None:
-            self.query_one(OfficePage).inspect(activity)
+            self.query_one(HomePage).inspect(activity)
 
-    async def on_office_page_agent_stop_requested(
-        self, message: OfficePage.AgentStopRequested
+    async def on_home_page_agent_stop_requested(
+        self, message: HomePage.AgentStopRequested
     ) -> None:
         client = self._agent_room_client
         if client is None or not self._agent_room_connected:
@@ -1590,8 +1516,8 @@ class VibeApp(App):  # noqa: PLR0904
         except (AgentRoomUnavailable, ValueError) as error:
             self.notify(str(error), severity="error")
 
-    async def on_office_page_agent_cancel_requested(
-        self, message: OfficePage.AgentCancelRequested
+    async def on_home_page_agent_cancel_requested(
+        self, message: HomePage.AgentCancelRequested
     ) -> None:
         client = self._agent_room_client
         if client is None or not self._agent_room_connected:
@@ -1602,8 +1528,8 @@ class VibeApp(App):  # noqa: PLR0904
         except (AgentRoomUnavailable, ValueError) as error:
             self.notify(str(error), severity="error")
 
-    async def on_office_page_agent_approval_resolved(
-        self, message: OfficePage.AgentApprovalResolved
+    async def on_home_page_agent_approval_resolved(
+        self, message: HomePage.AgentApprovalResolved
     ) -> None:
         client = self._agent_room_client
         if client is None or not self._agent_room_connected:
@@ -1616,8 +1542,8 @@ class VibeApp(App):  # noqa: PLR0904
         except (AgentRoomUnavailable, ValueError) as error:
             self.notify(str(error), severity="error")
 
-    async def on_office_page_agent_question_answered(
-        self, message: OfficePage.AgentQuestionAnswered
+    async def on_home_page_agent_question_answered(
+        self, message: HomePage.AgentQuestionAnswered
     ) -> None:
         client = self._agent_room_client
         if client is None or not self._agent_room_connected:
@@ -1841,11 +1767,11 @@ class VibeApp(App):  # noqa: PLR0904
             return
         if self._workspace_view is WorkspaceView.CHAT:
             return
-        if event.character is None or event.character not in "1234567":
+        if event.character is None or event.character not in "12345":
             return
         event.stop()
         event.prevent_default()
-        self._show_workspace(tuple(WorkspaceView)[int(event.character) - 1])
+        self._show_workspace(VISIBLE_WORKSPACE_VIEWS[int(event.character) - 1])
 
     async def on_chat_input_container_submitted(
         self, event: ChatInputContainer.Submitted
