@@ -14,6 +14,7 @@ from textual.widgets import Button, Input, Link, OptionList, Static
 from textual.widgets.option_list import Option, OptionDoesNotExist
 
 from vibe.cli.textual_ui.widgets.navigable_option_list import NavigableOptionList
+from vibe.cli.textual_ui.widgets.vscode_compat import VscodeCompatInput
 from vibe.cli.textual_ui.workspace.models import (
     AgentActivity,
     AgentActivitySnapshot,
@@ -446,9 +447,12 @@ class AgentStateCard(Vertical):
     """
 
     class InspectRequested(Message):
-        def __init__(self, activity: AgentActivity) -> None:
+        def __init__(
+            self, activity: AgentActivity, *, focus_composer: bool = False
+        ) -> None:
             super().__init__()
             self.activity = activity
+            self.focus_composer = focus_composer
 
     def __init__(self, activity: AgentActivity, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -484,7 +488,7 @@ class AgentStateCard(Vertical):
         if event.key != "enter":
             return
         event.stop()
-        self.post_message(self.InspectRequested(self.activity))
+        self.post_message(self.InspectRequested(self.activity, focus_composer=True))
 
     def on_click(self, event: events.Click) -> None:
         event.stop()
@@ -719,6 +723,9 @@ class ChatPage(ResponsiveWorkspacePage):
 
 
 class HomePage(ResponsiveWorkspacePage):
+    class NavigationRequested(Message):
+        pass
+
     class AgentMessageSubmitted(Message):
         def __init__(self, agent_id: str, content: str) -> None:
             super().__init__()
@@ -864,6 +871,11 @@ class HomePage(ResponsiveWorkspacePage):
     HomePage #office-agent-command {
         width: 1fr;
         height: 2;
+        color: $foreground;
+
+        &:ansi {
+            color: $ansi-foreground;
+        }
     }
 
     HomePage #office-agent-actions Button {
@@ -906,7 +918,9 @@ class HomePage(ResponsiveWorkspacePage):
             detail.display = self._inspected_id is not None
             yield detail
         with Horizontal(id="office-agent-actions"):
-            yield Input(placeholder="Task for a new agent", id="office-agent-command")
+            yield VscodeCompatInput(
+                placeholder="Task for a new agent", id="office-agent-command"
+            )
             yield Button("New agent", id="office-agent-create", variant="primary")
             stop = Button("Stop", id="office-agent-stop", variant="error")
             stop.display = False
@@ -950,6 +964,47 @@ class HomePage(ResponsiveWorkspacePage):
     ) -> None:
         message.stop()
         self.inspect(message.activity)
+        if message.focus_composer:
+            self.query_one("#office-agent-command", Input).focus()
+
+    def on_key(self, event: events.Key) -> None:
+        focused = self.screen.focused
+        if event.key == "escape":
+            event.stop()
+            self.post_message(self.NavigationRequested())
+            return
+        if not isinstance(focused, AgentStateCard):
+            return
+        direction = {"up": -1, "left": -1, "down": 1, "right": 1}.get(event.key)
+        if direction is None:
+            return
+        event.stop()
+        self._focus_relative_agent(focused, direction)
+
+    def focus_agents(self) -> None:
+        cards = tuple(self.query(AgentStateCard))
+        if not cards:
+            self.query_one("#office-agent-command", Input).focus()
+            return
+        selected = next(
+            (card for card in cards if card.activity.activity_id == self._inspected_id),
+            cards[0],
+        )
+        selected.focus()
+        self.inspect(selected.activity)
+
+    def _focus_relative_agent(self, focused: AgentStateCard, direction: int) -> None:
+        cards = tuple(self.query(AgentStateCard))
+        if not cards:
+            return
+        try:
+            index = cards.index(focused)
+        except ValueError:
+            index = 0
+        selected = cards[(index + direction) % len(cards)]
+        selected.focus()
+        selected.scroll_visible(animate=False)
+        self.inspect(selected.activity)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id != "office-agent-command":

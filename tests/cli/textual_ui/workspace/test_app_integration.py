@@ -9,7 +9,7 @@ import httpx
 from pydantic import BaseModel
 import pytest
 from textual.binding import Binding
-from textual.widgets import ContentSwitcher, Static
+from textual.widgets import ContentSwitcher, Input, Static
 
 from tests.conftest import build_test_vibe_app, build_test_vibe_config
 from vibe.cli.textual_ui.app import BottomApp, ChatScroll, StartupOptions, VibeApp
@@ -21,12 +21,20 @@ from vibe.cli.textual_ui.widgets.mcp_app import MCPApp
 from vibe.cli.textual_ui.widgets.messages import UserMessage
 from vibe.cli.textual_ui.widgets.question_app import QuestionApp
 from vibe.cli.textual_ui.workspace.coworkers import CoworkersPage
-from vibe.cli.textual_ui.workspace.models import AgentRunState, WorkspaceView
+from vibe.cli.textual_ui.workspace.models import (
+    AgentActivitySnapshot,
+    AgentRunState,
+    WorkspaceView,
+)
 from vibe.cli.textual_ui.workspace.navigation import (
     VISIBLE_WORKSPACE_VIEWS,
     WorkspaceNavigation,
 )
-from vibe.cli.textual_ui.workspace.pages import AgentStateCard, HomePage
+from vibe.cli.textual_ui.workspace.pages import (
+    AgentStateCard,
+    HomePage,
+    OfficeViewModel,
+)
 from vibe.core.agent_room import AgentRoomClient
 from vibe.core.config import MCPStdio
 from vibe.core.control_port import CLINavigateWorkspaceRequest, WorkspaceDestination
@@ -216,6 +224,60 @@ async def test_rail_arrow_enter_message_switches_content_and_focus() -> None:
         await pilot.pause()
         assert switcher.current == "workspace-chat"
         assert isinstance(app.focused, ChatTextArea)
+        await pilot.press(*list("visible text"))
+        assert app.focused.text == "visible text"
+        assert app.focused.styles.color.ansi == 7
+
+
+@pytest.mark.asyncio
+async def test_home_keyboard_flow_cycles_agents_opens_composer_and_returns_to_rail() -> (
+    None
+):
+    app = build_test_vibe_app(startup=StartupOptions())
+
+    async with app.run_test(size=(120, 36)) as pilot:
+        navigation = app.query_one(WorkspaceNavigation)
+        home = app.query_one(HomePage)
+        assert app.focused is navigation
+
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(app.focused, AgentStateCard)
+
+        first = home._view.snapshot.activities[0]
+        second = first.model_copy(
+            update={
+                "tool_call_id": "agent-second",
+                "agent_display_name": "Second agent",
+                "is_primary": False,
+                "managed_agent_id": "agent-second",
+            }
+        )
+        home.update_view(
+            OfficeViewModel(
+                AgentActivitySnapshot(
+                    session_id=home._view.snapshot.session_id,
+                    activities=(first, second),
+                )
+            )
+        )
+        await pilot.pause()
+        home.focus_agents()
+
+        await pilot.press("down")
+        assert isinstance(app.focused, AgentStateCard)
+        assert app.focused.activity.activity_id == second.activity_id
+        assert home._inspected_id == second.activity_id
+
+        await pilot.press("up", "enter")
+        command = home.query_one("#office-agent-command", Input)
+        assert app.focused is command
+        await pilot.press(*list("message agent"))
+        assert command.value == "message agent"
+        assert command.styles.color.ansi == 7
+
+        await pilot.press("escape")
+        assert app.focused is navigation
 
 
 @pytest.mark.asyncio

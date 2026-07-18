@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -300,14 +301,62 @@ def test_ensure_backend_starts_requested_port_and_waits_until_ready(
         lambda _url: next(reachable),
     )
 
-    def launch(workdir: Path, *, port: int, network_mode: str, force: bool) -> bool:
-        launched.append((workdir, port, network_mode, force))
-        return True
+    process = SimpleNamespace(poll=lambda: None, returncode=None)
 
-    monkeypatch.setattr("vibe.core.agent_room.client.launch_agent_room_backend", launch)
+    def launch(workdir: Path, *, port: int, network_mode: str, force: bool) -> object:
+        launched.append((workdir, port, network_mode, force))
+        return process
+
+    monkeypatch.setattr("vibe.core.agent_room.client._spawn_agent_room_backend", launch)
 
     assert (
         ensure_agent_room_backend(tmp_path, port=4183, network_mode="direct")
         == "http://127.0.0.1:4183"
     )
     assert launched == [(tmp_path, 4183, "direct", True)]
+
+
+def test_ensure_backend_retires_unresponsive_discovered_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    discovery_path = tmp_path / "agent-room" / "server.json"
+    discovery_path.parent.mkdir(parents=True)
+    discovery_path.write_text(
+        json.dumps({"url": "http://127.0.0.1:4173", "pid": 4321}), encoding="utf-8"
+    )
+    monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+    monkeypatch.delenv("VIBE_AGENT_ROOM_URL", raising=False)
+    reachable = iter((False, True))
+    retired: list[int] = []
+    process = SimpleNamespace(poll=lambda: None, returncode=None)
+    monkeypatch.setattr(
+        "vibe.core.agent_room.client._agent_room_reachable",
+        lambda _url: next(reachable),
+    )
+    monkeypatch.setattr(
+        "vibe.core.agent_room.client._stop_unresponsive_owner",
+        lambda record: retired.append(record["pid"]) or True,
+    )
+    monkeypatch.setattr(
+        "vibe.core.agent_room.client._spawn_agent_room_backend",
+        lambda *_args, **_kwargs: process,
+    )
+
+    assert ensure_agent_room_backend(tmp_path) == "http://127.0.0.1:4173"
+    assert retired == [4321]
+
+
+def test_ensure_backend_reports_child_exit_without_waiting_for_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    process = SimpleNamespace(poll=lambda: 1, returncode=1)
+    monkeypatch.setattr(
+        "vibe.core.agent_room.client._agent_room_reachable", lambda _url: False
+    )
+    monkeypatch.setattr(
+        "vibe.core.agent_room.client._spawn_agent_room_backend",
+        lambda *_args, **_kwargs: process,
+    )
+
+    with pytest.raises(ValueError, match="exited during startup with status 1"):
+        ensure_agent_room_backend(tmp_path)

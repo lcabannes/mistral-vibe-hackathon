@@ -1,4 +1,5 @@
 const STORAGE_KEY = "vibe-agent-room:v1";
+const THEME_STORAGE_KEY = "vibe-room-theme";
 const ACTIVE_STATES = new Set(["requested", "running", "working"]);
 const CONTROLLABLE_STATES = new Set([
   "requested",
@@ -97,6 +98,10 @@ const elements = {
   groupForm: document.querySelector("#group-form"),
   groupName: document.querySelector("#group-name"),
   groupSwatches: document.querySelector("#group-swatches"),
+  settingsButton: document.querySelector("#settings-button"),
+  settingsDialog: document.querySelector("#settings-dialog"),
+  settingsForm: document.querySelector("#settings-form"),
+  themeGrid: document.querySelector("#theme-grid"),
   agentDialog: document.querySelector("#agent-dialog"),
   agentForm: document.querySelector("#agent-form"),
   agentName: document.querySelector("#agent-name"),
@@ -112,6 +117,8 @@ const elements = {
   simulateButton: document.querySelector("#simulate-button"),
   feedStatus: document.querySelector("#feed-status"),
   officeClock: document.querySelector("#office-clock"),
+  roomLandmark: document.querySelector("#room-landmark"),
+  roomLandmarkUse: document.querySelector("#room-landmark-use"),
   summaryRunning: document.querySelector("#summary-running"),
   summaryAttention: document.querySelector("#summary-attention"),
   summaryPast: document.querySelector("#summary-past"),
@@ -143,6 +150,28 @@ function persistState() {
     STORAGE_KEY,
     JSON.stringify({ groupAssignments, customGroups }),
   );
+}
+
+function syncThemeUI(theme) {
+  for (const option of elements.themeGrid.querySelectorAll(".theme-option")) {
+    option.setAttribute("aria-pressed", String(option.dataset.themeChoice === (theme || "")));
+  }
+  elements.roomLandmarkUse.setAttribute("href", `#landmark-${theme || "default"}`);
+  elements.roomLandmark.hidden = !theme;
+}
+
+function applyTheme(theme) {
+  if (theme) {
+    document.documentElement.setAttribute("data-theme", theme);
+  } else {
+    document.documentElement.removeAttribute("data-theme");
+  }
+  try {
+    localStorage.setItem(THEME_STORAGE_KEY, theme || "");
+  } catch {
+    /* localStorage unavailable (e.g. private mode) — theme still applies for this session */
+  }
+  syncThemeUI(theme);
 }
 
 async function loadRoom() {
@@ -1942,7 +1971,8 @@ function bindEvents() {
       event.key === "Escape" &&
       state.selectedAgentId &&
       !elements.groupDialog.open &&
-      !elements.agentDialog.open
+      !elements.agentDialog.open &&
+      !elements.settingsDialog.open
     ) {
       closeDetails();
     }
@@ -1997,6 +2027,15 @@ function bindEvents() {
     elements.simulateButton.textContent = state.motionPaused ? "Resume motion" : "Pause motion";
   });
 
+  elements.settingsButton.addEventListener("click", () => {
+    elements.settingsDialog.showModal();
+  });
+  elements.themeGrid.addEventListener("click", (event) => {
+    const option = event.target.closest(".theme-option");
+    if (!option) return;
+    applyTheme(option.dataset.themeChoice);
+  });
+
   window.addEventListener("resize", () => {
     placeAgents();
     syncDetailModality();
@@ -2005,6 +2044,7 @@ function bindEvents() {
 
 async function start() {
   bindEvents();
+  syncThemeUI(document.documentElement.getAttribute("data-theme"));
   renderSwatches();
   updateClock();
   try {
