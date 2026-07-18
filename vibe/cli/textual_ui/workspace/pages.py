@@ -868,12 +868,12 @@ class HomePage(ResponsiveWorkspacePage):
         width: 1fr;
         height: 3;
         layout: horizontal;
-        padding-top: 1;
+        align-vertical: middle;
     }
 
     HomePage #office-agent-command {
         width: 1fr;
-        height: 2;
+        height: 3;
         color: $foreground;
 
         &:ansi:dark {
