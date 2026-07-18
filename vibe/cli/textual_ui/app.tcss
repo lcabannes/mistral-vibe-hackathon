@@ -210,8 +210,12 @@ TextArea > .text-area--cursor {
     color: $foreground;
 }
 
-TextArea:ansi > .text-area--cursor {
-    color: $ansi-foreground;
+TextArea:ansi:dark > .text-area--cursor {
+    color: #e0e0e0;
+}
+
+TextArea:ansi:light > .text-area--cursor {
+    color: #202020;
 }
 
 #chat {
@@ -433,8 +437,12 @@ OptionList, OptionList:focus {
     padding: 0;
     scrollbar-visibility: hidden;
 
-    &:ansi {
-        color: $ansi-foreground;
+    &:ansi:dark {
+        color: #e0e0e0;
+    }
+
+    &:ansi:light {
+        color: #202020;
     }
 
     &.recording {

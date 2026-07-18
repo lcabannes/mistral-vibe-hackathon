@@ -14,7 +14,10 @@ from textual.widgets import Button, Input, Link, OptionList, Static
 from textual.widgets.option_list import Option, OptionDoesNotExist
 
 from vibe.cli.textual_ui.widgets.navigable_option_list import NavigableOptionList
-from vibe.cli.textual_ui.widgets.vscode_compat import VscodeCompatInput
+from vibe.cli.textual_ui.widgets.vscode_compat import (
+    VscodeCompatInput,
+    patch_vscode_space,
+)
 from vibe.cli.textual_ui.workspace.models import (
     AgentActivity,
     AgentActivitySnapshot,
@@ -873,8 +876,22 @@ class HomePage(ResponsiveWorkspacePage):
         height: 2;
         color: $foreground;
 
-        &:ansi {
-            color: $ansi-foreground;
+        &:ansi:dark {
+            color: #e0e0e0;
+
+            & > .input--cursor {
+                color: #202020;
+                background: #e0e0e0;
+            }
+        }
+
+        &:ansi:light {
+            color: #202020;
+
+            & > .input--cursor {
+                color: #e0e0e0;
+                background: #202020;
+            }
         }
     }
 
@@ -900,7 +917,7 @@ class HomePage(ResponsiveWorkspacePage):
             yield Static(self._summary_text(), id="office-summary")
             room_url = self._view.server_url or ""
             link = Link(
-                "Open Agent Room",
+                "Open Agent Room in Browser",
                 url=room_url,
                 tooltip=room_url or None,
                 id="office-room-link",
@@ -919,7 +936,9 @@ class HomePage(ResponsiveWorkspacePage):
             yield detail
         with Horizontal(id="office-agent-actions"):
             yield VscodeCompatInput(
-                placeholder="Task for a new agent", id="office-agent-command"
+                placeholder="Task for a new agent",
+                id="office-agent-command",
+                select_on_focus=False,
             )
             yield Button("New agent", id="office-agent-create", variant="primary")
             stop = Button("Stop", id="office-agent-stop", variant="error")
@@ -975,7 +994,20 @@ class HomePage(ResponsiveWorkspacePage):
             return
         if not isinstance(focused, AgentStateCard):
             return
-        direction = {"up": -1, "left": -1, "down": 1, "right": 1}.get(event.key)
+        patch_vscode_space(event)
+        if event.character is not None and event.character.isprintable():
+            event.stop()
+            event.prevent_default()
+            command = self.query_one("#office-agent-command", Input)
+            command.focus()
+            command.insert_text_at_cursor(event.character)
+            return
+        direction = {
+            "up": -1,
+            "left": -1,
+            "down": 1,
+            "right": 1,
+        }.get(event.key)
         if direction is None:
             return
         event.stop()

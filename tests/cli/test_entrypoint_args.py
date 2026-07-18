@@ -54,12 +54,17 @@ def test_server_starts_backend_and_continues_with_shared_url(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls: list[tuple[Path, int, str]] = []
+    opened_urls: list[str] = []
 
     def ensure(workdir: Path, *, port: int, network_mode: str) -> str:
         calls.append((workdir, port, network_mode))
         return "http://127.0.0.1:4183"
 
-    monkeypatch.setattr("vibe.core.agent_room.ensure_agent_room_backend", ensure)
+    monkeypatch.setattr(
+        "vibe.core.agent_room.ensure_agent_room_backend",
+        ensure,
+    )
+    monkeypatch.setattr("webbrowser.open", opened_urls.append)
     monkeypatch.chdir(tmp_path)
     args = _parse(
         monkeypatch,
@@ -71,6 +76,7 @@ def test_server_starts_backend_and_continues_with_shared_url(
     assert calls == [(tmp_path, 4183, "direct")]
     assert os.environ["VIBE_AGENT_ROOM_URL"] == "http://127.0.0.1:4183"
     assert os.environ["VIBE_AGENT_ROOM_AUTOSTART"] == "0"
+    assert opened_urls == []
 
 
 def test_team_join_defaults_to_marker_only_history(

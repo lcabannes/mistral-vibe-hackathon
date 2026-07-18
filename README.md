@@ -75,13 +75,14 @@ uv run --no-dev vibe --server
 ```
 
 `vibe --server` starts or reuses the backend in the background and then opens
-the interactive CLI. Press `Ctrl+1` for **Home** and select **Open Agent Room**
-to open the webpage. The default URL is
-<http://127.0.0.1:4173/web/agent-room/>. `auto` is the recommended
-network mode: it keeps a working proxy and bypasses an inherited proxy that
-rejects Mistral API traffic. Pass `--server-network-mode direct` to always
-bypass shell proxy settings, or `--server-network-mode inherit` to always keep
-them. Use `--server-port PORT` to select another loopback port.
+the interactive CLI. It does not open a web browser automatically. Press
+`Ctrl+1` for **Home** and select **Open Agent Room in Browser**, or click the
+local URL printed at startup, to open the webpage in your browser. The default
+URL is <http://127.0.0.1:4173/web/agent-room/>. `auto` is the recommended network
+mode: it keeps a working proxy and bypasses an inherited proxy that rejects
+Mistral API traffic. Pass `--server-network-mode direct` to always bypass shell
+proxy settings, or `--server-network-mode inherit` to always keep them. Use
+`--server-port PORT` to select another loopback port.
 
 A coworker only needs to clone this repository, trust it when prompted, and run
 the same command. Team presence and agent status refresh automatically; no

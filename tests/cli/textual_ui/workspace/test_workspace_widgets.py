@@ -482,7 +482,7 @@ async def test_home_displays_clickable_agent_room_link() -> None:
         link = app.office.query_one("#office-room-link", Link)
         assert link.display
         assert link.url == room_url
-        assert str(link.render()) == "Open Agent Room"
+        assert str(link.render()) == "Open Agent Room in Browser"
 
 
 @pytest.mark.asyncio
