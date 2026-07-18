@@ -63,12 +63,20 @@ def _load_more_remaining(app: VibeApp) -> int:
     return int(remainder.rstrip(")"))
 
 
+def _test_app(agent_loop) -> VibeApp:
+    return VibeApp(
+        agent_loop=agent_loop,
+        plan_offer_gateway=_pro_plan_gateway(),
+        agent_room_client=False,
+    )
+
+
 @pytest.mark.asyncio
 async def test_ui_mount_defers_history_resume(
     vibe_config: VibeConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     agent_loop = build_test_agent_loop(config=vibe_config, enable_streaming=False)
-    app = VibeApp(agent_loop=agent_loop, plan_offer_gateway=_pro_plan_gateway())
+    app = _test_app(agent_loop)
     history_started = asyncio.Event()
     history_release = asyncio.Event()
     restore_from_session = Mock()
@@ -116,7 +124,7 @@ async def test_ui_session_incremental_loader_shows_tail_and_load_more(
         LLMMessage(role=Role.user, content=f"msg-{idx}") for idx in range(66)
     ])
 
-    app = VibeApp(agent_loop=agent_loop, plan_offer_gateway=_pro_plan_gateway())
+    app = _test_app(agent_loop)
 
     async with app.run_test() as pilot:
         await _wait_until(
@@ -143,7 +151,7 @@ async def test_ui_session_incremental_loader_load_more_shows_remaining_count(
         for idx in range(total_messages)
     ])
 
-    app = VibeApp(agent_loop=agent_loop, plan_offer_gateway=_pro_plan_gateway())
+    app = _test_app(agent_loop)
 
     async with app.run_test() as pilot:
         await _wait_until(
@@ -174,7 +182,7 @@ async def test_ui_session_incremental_loader_load_more_batches_until_done(
         LLMMessage(role=Role.user, content=f"msg-{idx}") for idx in range(31)
     ])
 
-    app = VibeApp(agent_loop=agent_loop, plan_offer_gateway=_pro_plan_gateway())
+    app = _test_app(agent_loop)
 
     async with app.run_test() as pilot:
         await _wait_until(
@@ -210,7 +218,7 @@ async def test_ui_session_incremental_loader_keeps_top_alignment_when_not_scroll
         for idx in range(HISTORY_RESUME_TAIL_MESSAGES + 1)
     ])
 
-    app = VibeApp(agent_loop=agent_loop, plan_offer_gateway=_pro_plan_gateway())
+    app = _test_app(agent_loop)
 
     # Each UserMessage renders as ~3 rows (top margin + content + separator);
     # add chrome (input box, banner, status) so all messages fit without scrolling.
@@ -236,7 +244,7 @@ async def test_chat_scroll_does_not_reanchor_during_text_selection(
         LLMMessage(role=Role.user, content=f"msg-{idx}") for idx in range(40)
     ])
 
-    app = VibeApp(agent_loop=agent_loop, plan_offer_gateway=_pro_plan_gateway())
+    app = _test_app(agent_loop)
 
     async with app.run_test(size=(80, 20)) as pilot:
         await _wait_until(pilot.pause, lambda: app.query_one("#chat", ChatScroll))

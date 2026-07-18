@@ -84,6 +84,8 @@ def store(tmp_path: Path) -> Any:
     instance._session_root = tmp_path / "sessions"
     instance._registry_path = tmp_path / "runs.json"
     instance._worker_environment = {"PYTHONUNBUFFERED": "1"}
+    instance._instance_id = "test-room-instance"
+    instance._revision = 0
     instance._network = {}
     instance._tools = [
         {"name": "bash", "display_name": "Bash"},
@@ -104,7 +106,34 @@ def store(tmp_path: Path) -> Any:
         },
     ]
     instance._runs = {}
+    instance._integration_branch = "codex/test-room"
     return instance
+
+
+def test_snapshot_exposes_revisioned_shared_backend_identity(store: Any) -> None:
+    snapshot = store.snapshot()
+
+    assert snapshot["api_version"] == 1
+    assert snapshot["instance_id"] == "test-room-instance"
+    assert snapshot["revision"] == 0
+    assert snapshot["workspace"] == {
+        "workdir": str(store._workdir),
+        "integration_branch": "codex/test-room",
+    }
+
+
+def test_only_one_backend_can_own_a_vibe_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+    first = room.AgentRoomOwnerLock()
+    second = room.AgentRoomOwnerLock()
+    first.acquire()
+    try:
+        with pytest.raises(RuntimeError, match="already owns"):
+            second.acquire()
+    finally:
+        first.release()
 
 
 def test_auto_network_bypasses_a_broken_inherited_proxy(

@@ -10,7 +10,7 @@ from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.timer import Timer
 from textual.widget import Widget
-from textual.widgets import OptionList, Static
+from textual.widgets import Button, Input, OptionList, Static
 from textual.widgets.option_list import Option, OptionDoesNotExist
 
 from vibe.cli.textual_ui.widgets.navigable_option_list import NavigableOptionList
@@ -717,12 +717,52 @@ class ChatPage(ResponsiveWorkspacePage):
 
 
 class OfficePage(ResponsiveWorkspacePage):
+    class AgentMessageSubmitted(Message):
+        def __init__(self, agent_id: str, content: str) -> None:
+            super().__init__()
+            self.agent_id = agent_id
+            self.content = content
+
+    class AgentCreateRequested(Message):
+        def __init__(self, task: str) -> None:
+            super().__init__()
+            self.task = task
+
+    class AgentStopRequested(Message):
+        def __init__(self, agent_id: str) -> None:
+            super().__init__()
+            self.agent_id = agent_id
+
+    class AgentCancelRequested(Message):
+        def __init__(self, agent_id: str) -> None:
+            super().__init__()
+            self.agent_id = agent_id
+
+    class AgentApprovalResolved(Message):
+        def __init__(self, agent_id: str, approval_id: str, decision: str) -> None:
+            super().__init__()
+            self.agent_id = agent_id
+            self.approval_id = approval_id
+            self.decision = decision
+
+    class AgentQuestionAnswered(Message):
+        def __init__(
+            self,
+            agent_id: str,
+            question_id: str,
+            answers: list[dict[str, object]],
+        ) -> None:
+            super().__init__()
+            self.agent_id = agent_id
+            self.question_id = question_id
+            self.answers = answers
+
     DEFAULT_CSS = """
     OfficePage {
         layout: grid;
         grid-size: 1;
         grid-columns: 1fr;
-        grid-rows: 2 2 1fr auto;
+        grid-rows: 2 2 1fr auto 3;
     }
 
     OfficePage #office-agent-grid {
@@ -784,6 +824,24 @@ class OfficePage(ResponsiveWorkspacePage):
         height: 8;
         max-height: 40%;
     }
+
+    OfficePage #office-agent-actions {
+        width: 1fr;
+        height: 3;
+        layout: horizontal;
+        padding-top: 1;
+    }
+
+    OfficePage #office-agent-command {
+        width: 1fr;
+        height: 2;
+    }
+
+    OfficePage #office-agent-actions Button {
+        min-width: 8;
+        height: 2;
+        margin-left: 1;
+    }
     """
 
     def __init__(self, view: OfficeViewModel, **kwargs: Any) -> None:
@@ -803,6 +861,26 @@ class OfficePage(ResponsiveWorkspacePage):
         )
         detail.display = False
         yield detail
+        with Horizontal(id="office-agent-actions"):
+            yield Input(
+                placeholder="Task for a new agent", id="office-agent-command"
+            )
+            yield Button("New agent", id="office-agent-create", variant="primary")
+            stop = Button("Stop", id="office-agent-stop", variant="error")
+            stop.display = False
+            yield stop
+            cancel = Button("Cancel", id="office-agent-cancel")
+            cancel.display = False
+            yield cancel
+            approve = Button("Approve", id="office-agent-approve", variant="success")
+            approve.display = False
+            yield approve
+            deny = Button("Deny", id="office-agent-deny", variant="error")
+            deny.display = False
+            yield deny
+            send = Button("Send", id="office-agent-send", variant="primary")
+            send.display = False
+            yield send
 
     def update_view(self, view: OfficeViewModel) -> None:
         self._view = view
@@ -824,6 +902,48 @@ class OfficePage(ResponsiveWorkspacePage):
         event.stop()
         self._inspected_id = None
         self._refresh_detail()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id != "office-agent-command":
+            return
+        event.stop()
+        self._submit_command()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "office-agent-send":
+            self._submit_command()
+        elif event.button.id == "office-agent-create":
+            self._submit_create()
+        elif event.button.id == "office-agent-stop":
+            activity = self._inspected_activity()
+            if activity is not None and activity.managed_agent_id is not None:
+                self.post_message(
+                    self.AgentStopRequested(activity.managed_agent_id)
+                )
+        elif event.button.id == "office-agent-cancel":
+            activity = self._inspected_activity()
+            if activity is not None and activity.managed_agent_id is not None:
+                self.post_message(
+                    self.AgentCancelRequested(activity.managed_agent_id)
+                )
+        elif event.button.id in {"office-agent-approve", "office-agent-deny"}:
+            activity = self._inspected_activity()
+            approval = self._pending_interaction(activity, "approvals")
+            if (
+                activity is not None
+                and activity.managed_agent_id is not None
+                and approval is not None
+            ):
+                decision = (
+                    "approve_once"
+                    if event.button.id == "office-agent-approve"
+                    else "deny"
+                )
+                self.post_message(
+                    self.AgentApprovalResolved(
+                        activity.managed_agent_id, str(approval["id"]), decision
+                    )
+                )
 
     def inspect(self, activity: AgentActivity) -> None:
         self._inspected_id = activity.tool_call_id
@@ -876,10 +996,115 @@ class OfficePage(ResponsiveWorkspacePage):
         if activity is None:
             self._inspected_id = None
             detail.display = False
+            self._refresh_actions(None)
             return
         detail.display = True
         self.query_one("#office-detail-content", Static).update(
             self._detail_text(activity)
+        )
+        self._refresh_actions(activity)
+
+    def _inspected_activity(self) -> AgentActivity | None:
+        return next(
+            (
+                item
+                for item in self._view.snapshot.activities
+                if item.tool_call_id == self._inspected_id
+            ),
+            None,
+        )
+
+    def _refresh_actions(self, activity: AgentActivity | None) -> None:
+        command = self.query_one("#office-agent-command", Input)
+        create = self.query_one("#office-agent-create", Button)
+        send = self.query_one("#office-agent-send", Button)
+        stop = self.query_one("#office-agent-stop", Button)
+        cancel = self.query_one("#office-agent-cancel", Button)
+        approve = self.query_one("#office-agent-approve", Button)
+        deny = self.query_one("#office-agent-deny", Button)
+        selected = activity is not None and activity.managed_agent_id is not None
+        pending_approval = self._pending_interaction(activity, "approvals")
+        pending_question = self._pending_interaction(activity, "questions")
+        command.placeholder = (
+            "Answer the agent's question"
+            if pending_question is not None
+            else f"Message {activity.agent_display_name}"
+            if selected and activity is not None
+            else "Task for a new agent"
+        )
+        create.display = not selected
+        send.display = selected and pending_approval is None
+        send.label = "Answer" if pending_question is not None else "Send"
+        stop.display = selected and activity is not None and activity.runtime_live
+        cancel.display = (
+            selected
+            and activity is not None
+            and activity.state
+            in {AgentRunState.RUNNING, AgentRunState.WORKING, AgentRunState.ATTENTION}
+        )
+        approve.display = pending_approval is not None
+        deny.display = pending_approval is not None
+
+    def _submit_command(self) -> None:
+        activity = self._inspected_activity()
+        if activity is None or activity.managed_agent_id is None:
+            self._submit_create()
+            return
+        command = self.query_one("#office-agent-command", Input)
+        content = command.value.strip()
+        if not content:
+            return
+        command.value = ""
+        question = self._pending_interaction(activity, "questions")
+        if question is not None:
+            raw_questions = question.get("questions")
+            prompts = raw_questions if isinstance(raw_questions, list) else []
+            answers = [
+                {
+                    "question": str(prompt.get("question") or "Question"),
+                    "answer": content,
+                    "is_other": True,
+                }
+                for prompt in prompts
+                if isinstance(prompt, dict)
+            ]
+            if not answers:
+                answers = [
+                    {"question": "Question", "answer": content, "is_other": True}
+                ]
+            self.post_message(
+                self.AgentQuestionAnswered(
+                    activity.managed_agent_id, str(question["id"]), answers
+                )
+            )
+            return
+        self.post_message(
+            self.AgentMessageSubmitted(activity.managed_agent_id, content)
+        )
+
+    def _submit_create(self) -> None:
+        command = self.query_one("#office-agent-command", Input)
+        task = command.value.strip()
+        if not task:
+            return
+        command.value = ""
+        self.post_message(self.AgentCreateRequested(task))
+
+    @staticmethod
+    def _pending_interaction(
+        activity: AgentActivity | None, field: str
+    ) -> dict[str, object] | None:
+        if activity is None:
+            return None
+        interactions = activity.approvals if field == "approvals" else activity.questions
+        return next(
+            (
+                interaction
+                for interaction in reversed(interactions)
+                if interaction.get("status") == "pending"
+                and interaction.get("id") is not None
+            ),
+            None,
         )
 
     @staticmethod
@@ -890,19 +1115,80 @@ class OfficePage(ResponsiveWorkspacePage):
         if activity.managed_agent_id is not None:
             text.append(f"\nWorker  {activity.managed_agent_id}")
             text.append(f"\nQueued  {activity.queued_messages}")
+        if activity.group_id:
+            text.append(f"\nGroup   {activity.group_id}")
         text.append(f"\nState   {_state_presentation(activity.state)[1]}")
+        OfficePage._append_run_metrics(text, activity)
+        OfficePage._append_pending_interactions(text, activity)
         if activity.error:
             text.append(f"\n\nError\n{activity.error}", style="bold")
-        if activity.last_response:
+        OfficePage._append_conversation(text, activity)
+        return text
+
+    @staticmethod
+    def _append_run_metrics(text: Text, activity: AgentActivity) -> None:
+        if activity.model:
+            text.append(f"\nModel   {activity.model}")
+        if activity.usage is not None:
+            total_tokens = (
+                activity.usage.prompt_tokens + activity.usage.completion_tokens
+            )
+            text.append(f"\nTokens  {total_tokens:,}")
+        if activity.context_limit:
+            text.append(
+                f"\nMemory  {activity.context_tokens:,} / "
+                f"{activity.context_limit:,}"
+            )
+        if activity.estimated_cost_usd:
+            text.append(f"\nCost    ${activity.estimated_cost_usd:.4f}")
+        if activity.branch:
+            text.append(f"\nBranch  {activity.branch}")
+        if activity.worktree_path:
+            text.append(f"\nTree    {activity.worktree_path}")
+
+    @staticmethod
+    def _append_pending_interactions(text: Text, activity: AgentActivity) -> None:
+        approval = OfficePage._pending_interaction(activity, "approvals")
+        if approval is not None:
+            text.append("\n\nApproval required", style="bold")
+            text.append(f"\n{approval.get('tool_name') or 'Tool call'}")
+            arguments = approval.get("arguments")
+            if arguments:
+                text.append(f"\n{arguments}", style="dim")
+        question = OfficePage._pending_interaction(activity, "questions")
+        if question is not None:
+            text.append("\n\nAgent question", style="bold")
+            prompts = question.get("questions")
+            if isinstance(prompts, list):
+                for prompt in prompts:
+                    if isinstance(prompt, dict):
+                        text.append(f"\n{prompt.get('question') or 'Question'}")
+
+    @staticmethod
+    def _append_conversation(text: Text, activity: AgentActivity) -> None:
+        if activity.conversation:
+            text.append("\n\nConversation", style="bold")
+            for message in activity.conversation[-12:]:
+                label = "You" if message.role == "user" else "Agent"
+                text.append(f"\n\n{label}  ", style="bold")
+                text.append(message.content)
+                if message.status not in {"succeeded", "completed"}:
+                    text.append(f"  [{message.status}]", style="dim")
+        elif activity.last_response:
             text.append(f"\n\nOutput\n{activity.last_response}")
         elif activity.is_managed:
             text.append("\n\nNo output yet", style="dim")
-        return text
 
     def _summary_text(self) -> str:
         activities = self._view.snapshot.activities
         active = sum(item.state in _ACTIVE_STATES for item in activities)
         summary = f"{_activity_count_label(len(activities))}  ·  {active} active"
+        context_tokens = sum(item.context_tokens for item in activities)
+        estimated_cost = sum(item.estimated_cost_usd for item in activities)
+        if context_tokens:
+            summary += f"  ·  {_compact_count(context_tokens)} context"
+        if estimated_cost:
+            summary += f"  ·  ${estimated_cost:.4f}"
         if self._view.scope_label:
             return f"{self._view.scope_label}  ·  {summary}"
         return summary

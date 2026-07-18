@@ -13,6 +13,7 @@ import re
 import shlex
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 from threading import Event, RLock, Thread
@@ -22,6 +23,11 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 import httpx
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 if str(REPOSITORY_ROOT) not in sys.path:
@@ -54,6 +60,9 @@ MAX_ROOM_IMAGES = 4
 MAX_ROOM_IMAGE_BYTES = 4 * 1024 * 1024
 ALLOWED_IMAGE_TYPES = {"image/gif", "image/jpeg", "image/png", "image/webp"}
 LOOPBACK_HOST = "127.0.0.1"
+API_VERSION = 1
+DISCOVERY_FILE = "agent-room/server.json"
+OWNER_LOCK_FILE = "agent-room/server.lock"
 ALLOWED_STATIC_PATHS = {
     "/web/agent-room/",
     "/web/agent-room/index.html",
@@ -196,6 +205,8 @@ class AgentRoomStore:
     def __init__(self, workdir: Path, *, network_mode: str = "auto") -> None:
         self._workdir = workdir
         self._lock = RLock()
+        self._instance_id = uuid4().hex
+        self._revision = 0
         self._lifecycle_locks: dict[str, RLock] = {}
         self._workers: dict[str, AgentWorker] = {}
         vibe_home = Path(os.environ.get("VIBE_HOME", "~/.vibe")).expanduser()
@@ -216,7 +227,14 @@ class AgentRoomStore:
             for run in self._runs.values():
                 self._refresh_worktree_status_locked(run)
             return {
+                "api_version": API_VERSION,
+                "instance_id": self._instance_id,
+                "revision": self._revision,
                 "connected": True,
+                "workspace": {
+                    "workdir": str(self._workdir),
+                    "integration_branch": self._integration_branch,
+                },
                 "activities": [self._public_run(run) for run in self._runs.values()],
                 "profiles": deepcopy(self._profiles),
                 "tools": deepcopy(self._tools),
@@ -1394,6 +1412,7 @@ class AgentRoomStore:
         return runs
 
     def _persist_locked(self) -> None:
+        self._revision += 1
         self._registry_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self._registry_path.with_suffix(".json.tmp")
         temporary.write_text(
@@ -1811,6 +1830,89 @@ class AgentRoomHTTPServer(ThreadingHTTPServer):
         self.store = store
 
 
+class AgentRoomOwnerLock:
+    def __init__(self) -> None:
+        vibe_home = Path(os.environ.get("VIBE_HOME", "~/.vibe")).expanduser()
+        self.path = vibe_home / OWNER_LOCK_FILE
+        self._handle: Any | None = None
+
+    def acquire(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        handle = self.path.open("a+", encoding="utf-8")
+        try:
+            if os.name == "nt":
+                handle.seek(0)
+                if not handle.read(1):
+                    handle.write("0")
+                    handle.flush()
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            handle.close()
+            raise RuntimeError(
+                "Another Agent Room backend already owns this VIBE_HOME"
+            ) from error
+        self._handle = handle
+
+    def release(self) -> None:
+        handle = self._handle
+        self._handle = None
+        if handle is None:
+            return
+        try:
+            if os.name == "nt":
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+
+
+def _discovery_path() -> Path:
+    vibe_home = Path(os.environ.get("VIBE_HOME", "~/.vibe")).expanduser()
+    return vibe_home / DISCOVERY_FILE
+
+
+def write_discovery(store: AgentRoomStore, port: int, workdir: Path) -> None:
+    path = _discovery_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    snapshot = store.snapshot()
+    payload = {
+        "api_version": API_VERSION,
+        "instance_id": snapshot["instance_id"],
+        "pid": os.getpid(),
+        "url": f"http://{LOOPBACK_HOST}:{port}",
+        "workdir": str(workdir),
+    }
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
+def remove_discovery(instance_id: str) -> None:
+    path = _discovery_path()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if payload.get("instance_id") == instance_id:
+            path.unlink(missing_ok=True)
+    except (FileNotFoundError, OSError, json.JSONDecodeError, AttributeError):
+        return
+
+
+def assert_endpoint_available(port: int) -> None:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as endpoint:
+            endpoint.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            endpoint.bind((LOOPBACK_HOST, port))
+    except OSError as error:
+        raise RuntimeError(
+            f"Agent Room endpoint {LOOPBACK_HOST}:{port} is already in use"
+        ) from error
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Serve the Vibe Agent Room")
     parser.add_argument("--port", type=int, default=4173)
@@ -1830,8 +1932,27 @@ def main() -> None:
     if not workdir.is_dir():
         raise SystemExit(f"Workdir does not exist: {workdir}")
     init_harness_files_manager("user", "project")
-    store = AgentRoomStore(workdir, network_mode=args.network_mode)
-    server = AgentRoomHTTPServer((LOOPBACK_HOST, args.port), store)
+    owner_lock = AgentRoomOwnerLock()
+    try:
+        owner_lock.acquire()
+        assert_endpoint_available(args.port)
+    except RuntimeError as error:
+        owner_lock.release()
+        discovered = _discovery_path()
+        raise SystemExit(f"{error}. Discovery: {discovered}") from error
+    try:
+        store = AgentRoomStore(workdir, network_mode=args.network_mode)
+    except BaseException:
+        owner_lock.release()
+        raise
+    try:
+        server = AgentRoomHTTPServer((LOOPBACK_HOST, args.port), store)
+    except BaseException:
+        store.close()
+        owner_lock.release()
+        raise
+    write_discovery(store, args.port, workdir)
+    instance_id = store.snapshot()["instance_id"]
     print(f"Agent Room: http://{LOOPBACK_HOST}:{args.port}/web/agent-room/")
     print(f"Integration worktree: {workdir}")
     network = store.snapshot()["network"]
@@ -1846,6 +1967,8 @@ def main() -> None:
     finally:
         server.server_close()
         store.close()
+        remove_discovery(instance_id)
+        owner_lock.release()
 
 
 if __name__ == "__main__":

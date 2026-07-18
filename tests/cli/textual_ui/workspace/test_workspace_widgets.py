@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 from textual import on
 from textual.app import App, ComposeResult
-from textual.widgets import OptionList, Static
+from textual.widgets import Input, OptionList, Static
 
 from vibe.cli.textual_ui.widgets.mcp_app import MCPApp
 from vibe.cli.textual_ui.widgets.navigable_option_list import NavigableOptionList
@@ -212,6 +212,12 @@ class _PagesApp(App[None]):
         )
         self.selected_agents: list[AgentProfileViewModel] = []
         self.selected_attention: list[AgentActivity] = []
+        self.agent_messages: list[tuple[str, str]] = []
+        self.agent_tasks: list[str] = []
+        self.stopped_agents: list[str] = []
+        self.cancelled_agents: list[str] = []
+        self.agent_approvals: list[tuple[str, str, str]] = []
+        self.agent_answers: list[tuple[str, str, list[dict[str, object]]]] = []
 
     def compose(self) -> ComposeResult:
         yield self.home
@@ -226,6 +232,36 @@ class _PagesApp(App[None]):
     @on(HomePage.AttentionSelected)
     def record_attention_selection(self, message: HomePage.AttentionSelected) -> None:
         self.selected_attention.append(message.activity)
+
+    @on(OfficePage.AgentMessageSubmitted)
+    def record_agent_message(self, message: OfficePage.AgentMessageSubmitted) -> None:
+        self.agent_messages.append((message.agent_id, message.content))
+
+    @on(OfficePage.AgentCreateRequested)
+    def record_agent_create(self, message: OfficePage.AgentCreateRequested) -> None:
+        self.agent_tasks.append(message.task)
+
+    @on(OfficePage.AgentStopRequested)
+    def record_agent_stop(self, message: OfficePage.AgentStopRequested) -> None:
+        self.stopped_agents.append(message.agent_id)
+
+    @on(OfficePage.AgentCancelRequested)
+    def record_agent_cancel(self, message: OfficePage.AgentCancelRequested) -> None:
+        self.cancelled_agents.append(message.agent_id)
+
+    @on(OfficePage.AgentApprovalResolved)
+    def record_agent_approval(
+        self, message: OfficePage.AgentApprovalResolved
+    ) -> None:
+        self.agent_approvals.append(
+            (message.agent_id, message.approval_id, message.decision)
+        )
+
+    @on(OfficePage.AgentQuestionAnswered)
+    def record_agent_answer(self, message: OfficePage.AgentQuestionAnswered) -> None:
+        self.agent_answers.append(
+            (message.agent_id, message.question_id, message.answers)
+        )
 
 
 @pytest.mark.asyncio
@@ -343,6 +379,107 @@ async def test_home_attention_and_office_details_use_typed_activity() -> None:
 
         await pilot.press("escape")
         assert not detail.display
+
+
+@pytest.mark.asyncio
+async def test_office_composer_creates_messages_and_stops_room_agents() -> None:
+    app = _PagesApp()
+
+    async with app.run_test(size=(100, 38)) as pilot:
+        command = app.office.query_one("#office-agent-command", Input)
+        command.value = "Implement the API adapter"
+        command.focus()
+        await pilot.press("enter")
+        assert app.agent_tasks == ["Implement the API adapter"]
+
+        activity = _activity(AgentRunState.WORKING).model_copy(
+            update={
+                "managed_agent_id": "agent-1",
+                "runtime_live": True,
+                "agent_display_name": "Builder",
+            }
+        )
+        app.office.update_view(
+            OfficeViewModel(
+                AgentActivitySnapshot(session_id="room", activities=(activity,))
+            )
+        )
+        app.office.inspect(activity)
+        command.value = "Run the focused tests"
+        command.focus()
+        await pilot.press("enter")
+        assert app.agent_messages == [("agent-1", "Run the focused tests")]
+
+        await pilot.click("#office-agent-stop")
+        assert app.stopped_agents == ["agent-1"]
+        await pilot.click("#office-agent-cancel")
+        assert app.cancelled_agents == ["agent-1"]
+
+
+@pytest.mark.asyncio
+async def test_office_resolves_room_approvals_and_questions() -> None:
+    app = _PagesApp()
+    approval_activity = _activity(AgentRunState.ATTENTION).model_copy(
+        update={
+            "managed_agent_id": "agent-1",
+            "runtime_live": True,
+            "approvals": (
+                {"id": "approval-1", "status": "pending", "tool_name": "bash"},
+            ),
+        }
+    )
+
+    async with app.run_test(size=(100, 38)) as pilot:
+        app.office.update_view(
+            OfficeViewModel(
+                AgentActivitySnapshot(
+                    session_id="room", activities=(approval_activity,)
+                )
+            )
+        )
+        app.office.inspect(approval_activity)
+        await pilot.pause()
+        await pilot.click("#office-agent-approve")
+        assert app.agent_approvals == [
+            ("agent-1", "approval-1", "approve_once")
+        ]
+
+        question_activity = approval_activity.model_copy(
+            update={
+                "approvals": (),
+                "questions": (
+                    {
+                        "id": "question-1",
+                        "status": "pending",
+                        "questions": [{"question": "Which database?"}],
+                    },
+                ),
+            }
+        )
+        app.office.update_view(
+            OfficeViewModel(
+                AgentActivitySnapshot(
+                    session_id="room", activities=(question_activity,)
+                )
+            )
+        )
+        command = app.office.query_one("#office-agent-command", Input)
+        command.value = "PostgreSQL"
+        command.focus()
+        await pilot.press("enter")
+        assert app.agent_answers == [
+            (
+                "agent-1",
+                "question-1",
+                [
+                    {
+                        "question": "Which database?",
+                        "answer": "PostgreSQL",
+                        "is_other": True,
+                    }
+                ],
+            )
+        ]
 
 
 class _MCPPageApp(App[None]):

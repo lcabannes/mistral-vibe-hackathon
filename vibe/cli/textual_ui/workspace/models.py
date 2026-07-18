@@ -4,6 +4,7 @@ from enum import StrEnum, auto
 
 from pydantic import BaseModel, ConfigDict
 
+from vibe.core.agent_room.models import AgentRoomConversationMessage
 from vibe.core.types import LLMUsage
 
 
@@ -56,6 +57,16 @@ class AgentActivity(BaseModel):
     queued_messages: int = 0
     last_response: str = ""
     error: str | None = None
+    conversation: tuple[AgentRoomConversationMessage, ...] = ()
+    context_tokens: int = 0
+    context_limit: int | None = None
+    estimated_cost_usd: float = 0.0
+    model: str | None = None
+    group_id: str | None = None
+    runtime_live: bool = False
+    worktree_path: str | None = None
+    approvals: tuple[dict[str, object], ...] = ()
+    questions: tuple[dict[str, object], ...] = ()
 
     @property
     def is_managed(self) -> bool:

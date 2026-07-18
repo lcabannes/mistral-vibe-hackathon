@@ -712,7 +712,15 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
     async def managed_agent_events(
         self,
     ) -> AsyncGenerator[ManagedAgentLifecycleEvent, None]:
-        async for event in self._get_agent_supervisor().subscribe_events():
+        management = self._external_agent_management
+        if management is None:
+            if not self.config.enable_agent_management:
+                return
+            management = self._get_agent_supervisor()
+        subscribe = getattr(management, "subscribe_events", None)
+        if subscribe is None:
+            return
+        async for event in subscribe():
             yield event
 
     async def stop_managed_agents_for_session_change(self) -> None:
