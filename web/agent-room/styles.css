@@ -398,9 +398,9 @@ select:focus-visible {
 }
 
 .room-header {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) auto;
   align-items: end;
-  justify-content: space-between;
   gap: 24px;
   padding: 22px 28px 16px;
 }
@@ -456,6 +456,15 @@ h1 {
   color: var(--muted);
   font-size: 10px;
   font-weight: 700;
+}
+
+.coordination-strip {
+  grid-column: 1 / -1;
+  margin: -14px 0 0;
+  color: var(--muted);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 10px;
+  text-align: right;
 }
 
 .room-toolbar {
@@ -1439,6 +1448,11 @@ h1 {
   padding: 18px;
 }
 
+.detail-content.is-chat {
+  display: flex;
+  flex-direction: column;
+}
+
 .detail-identity {
   display: grid;
   grid-template-columns: 48px minmax(0, 1fr);
@@ -1587,10 +1601,13 @@ h1 {
 
 .transcript {
   display: grid;
+  align-content: start;
   gap: 9px;
+  min-height: 120px;
 }
 
 .message {
+  align-self: start;
   max-width: 92%;
   padding: 9px 10px;
   border: 1px solid var(--line);
@@ -1602,6 +1619,7 @@ h1 {
 
 .message.is-user {
   justify-self: end;
+  min-width: 120px;
   border-color: #efb675;
   background: #fff5e9;
 }
@@ -1612,6 +1630,166 @@ h1 {
   color: var(--muted);
   font-size: 9px;
   text-transform: uppercase;
+}
+
+.message > span {
+  display: block;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.message.is-system {
+  justify-self: stretch;
+  max-width: 100%;
+  border-style: dashed;
+  background: #f0f1ed;
+}
+
+.message-status {
+  display: block;
+  margin-top: 5px;
+  color: var(--muted);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 9px;
+}
+
+.chat-view {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 360px;
+  padding-bottom: 0;
+}
+
+.chat-view .transcript {
+  flex: 1;
+}
+
+.composer-wrap {
+  position: sticky;
+  bottom: -18px;
+  z-index: 5;
+  margin: 16px -18px 0;
+  padding: 10px 18px calc(14px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--line);
+  background: #f7f7f3;
+}
+
+.chat-composer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 8px;
+}
+
+.chat-composer textarea {
+  width: 100%;
+  min-height: 52px;
+  max-height: 160px;
+  resize: vertical;
+  border-color: #aaa9a2;
+  background: white;
+}
+
+.composer-send,
+.composer-cancel,
+.approval-actions .button,
+.question-request .button {
+  min-height: 44px;
+}
+
+.composer-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 25px;
+  margin-top: 7px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.composer-meta .button {
+  min-height: 30px;
+}
+
+.command-menu {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-bottom: 7px;
+}
+
+.command-menu[hidden] {
+  display: none;
+}
+
+.command-menu button {
+  min-height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--ink);
+  background: white;
+  cursor: pointer;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 10px;
+}
+
+.approval-request,
+.question-request {
+  display: grid;
+  gap: 9px;
+  padding: 12px;
+  border: 1px solid #d98f3c;
+  border-radius: 6px;
+  background: #fff5e9;
+}
+
+.approval-request pre {
+  max-height: 160px;
+  margin: 0;
+  overflow: auto;
+  color: var(--ink);
+  font-size: 10px;
+  white-space: pre-wrap;
+}
+
+.approval-request p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.approval-actions {
+  display: flex;
+  gap: 7px;
+}
+
+.question-request fieldset {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.question-request legend {
+  margin-bottom: 5px;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.chat-error {
+  margin: 10px 0 0;
+  padding: 9px;
+  border: 1px solid #e1aaa8;
+  border-radius: 5px;
+  color: #8d0804;
+  background: #fff0ef;
+  font-size: 10px;
+  line-height: 1.4;
 }
 
 .empty-panel {
@@ -1925,6 +2103,10 @@ h1 {
     padding: 19px 18px 14px;
   }
 
+  .coordination-strip {
+    text-align: left;
+  }
+
   .room-toolbar {
     align-items: stretch;
     flex-direction: column-reverse;
@@ -2079,6 +2261,22 @@ h1 {
   .detail-panel {
     inset: 52px 0 0;
     z-index: 40;
+  }
+
+  .detail-content {
+    padding: 14px;
+  }
+
+  .composer-wrap {
+    bottom: -14px;
+    margin-right: -14px;
+    margin-left: -14px;
+    padding-right: 14px;
+    padding-left: 14px;
+  }
+
+  .chat-composer {
+    grid-template-columns: minmax(0, 1fr) 72px;
   }
 
   .activity-bubble {

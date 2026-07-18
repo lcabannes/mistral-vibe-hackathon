@@ -68,7 +68,7 @@
           <span class="avatar">LC</span>
           <span>
             <strong>Local workspace</strong>
-            <small>codex/agent-home</small>
+            <small id="workspace-branch">Local branch</small>
           </span>
         </div>
       </aside>
@@ -85,6 +85,9 @@
             <div><strong id="summary-past">0</strong><span>Past</span></div>
             <div><strong id="summary-idle">0</strong><span>Idle</span></div>
           </div>
+          <p class="coordination-strip" id="coordination-strip">
+            Isolated agent runtime
+          </p>
         </section>
 
         <section class="room-toolbar" aria-label="Room controls">
@@ -241,7 +244,7 @@
             id="agent-task"
             name="agent-task"
             rows="4"
-            maxlength="300"
+            maxlength="4000"
             placeholder="What should this agent work on?"
             required
           ></textarea>

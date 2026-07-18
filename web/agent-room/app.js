@@ -1,8 +1,21 @@
 const STORAGE_KEY = "vibe-agent-room:v1";
 const ACTIVE_STATES = new Set(["requested", "running", "working"]);
-const TERMINAL_STATES = new Set(["failed", "completed", "cancelled"]);
-const ATTENTION_STATES = new Set(["attention"]);
+const CONTROLLABLE_STATES = new Set([
+  "requested",
+  "running",
+  "working",
+  "attention",
+  "idle",
+  "failed",
+]);
+const TERMINAL_STATES = new Set(["completed", "cancelled"]);
+const ATTENTION_STATES = new Set(["attention", "failed"]);
 const PAST_STATES = TERMINAL_STATES;
+const COORDINATION_GROUP = {
+  id: "coordination",
+  name: "Coordination",
+  color: "#171722",
+};
 const UNASSIGNED_GROUP = {
   id: "unassigned",
   name: "Unassigned",
@@ -36,6 +49,7 @@ const state = {
   agents: [],
   groups: [],
   profiles: [],
+  coordination: null,
   connected: false,
   bridgeSeen: false,
   selectedAgentId: null,
@@ -48,6 +62,10 @@ const state = {
   selectedSwatch: GROUP_COLORS[0],
   lastSnapshot: "",
   agentDialogOrigin: null,
+  chatDrafts: new Map(),
+  chatErrors: new Map(),
+  composerSelections: new Map(),
+  pendingRequests: new Set(),
 };
 
 const elements = {
@@ -88,6 +106,8 @@ const elements = {
   summaryAttention: document.querySelector("#summary-attention"),
   summaryPast: document.querySelector("#summary-past"),
   summaryIdle: document.querySelector("#summary-idle"),
+  coordinationStrip: document.querySelector("#coordination-strip"),
+  workspaceBranch: document.querySelector("#workspace-branch"),
 };
 
 function readStoredState() {
@@ -119,12 +139,18 @@ async function loadRoom() {
     : [];
   const sourceGroups = seed.groups.filter(isValidGroup);
   const groupIds = new Set([
+    COORDINATION_GROUP.id,
     ...sourceGroups.map((group) => group.id),
     ...customGroups.map((group) => group.id),
     UNASSIGNED_GROUP.id,
   ]);
 
-  state.groups = [...sourceGroups, ...customGroups, UNASSIGNED_GROUP];
+  state.groups = [
+    COORDINATION_GROUP,
+    ...sourceGroups.filter((group) => group.id !== COORDINATION_GROUP.id),
+    ...customGroups.filter((group) => group.id !== COORDINATION_GROUP.id),
+    UNASSIGNED_GROUP,
+  ];
   try {
     const liveResponse = await fetch("/api/agent-runs", { cache: "no-store" });
     if (!liveResponse.ok) throw new Error("Live bridge unavailable");
@@ -132,6 +158,7 @@ async function loadRoom() {
     state.connected = live.connected === true;
     state.bridgeSeen = state.connected;
     state.profiles = Array.isArray(live.profiles) ? live.profiles : [];
+    state.coordination = live.coordination || null;
     state.agents = normalizeAgents(live.activities, groupIds, stored);
     state.lastSnapshot = JSON.stringify(live.activities);
     setFeedStatus("Live local", false);
@@ -151,11 +178,12 @@ function normalizeAgents(activities, groupIds, stored) {
     const normalized = {
       ...agent,
       source,
-      group_id: groupIds.has(storedGroup)
-        ? storedGroup
-        : groupIds.has(agent.group_id)
-          ? agent.group_id
-          : UNASSIGNED_GROUP.id,
+      group_id:
+        source === "demo" && groupIds.has(storedGroup)
+          ? storedGroup
+          : groupIds.has(agent.group_id)
+            ? agent.group_id
+            : UNASSIGNED_GROUP.id,
     };
     if (source === "demo") {
       const duration = Math.max(1, agent.updated_at - agent.started_at);
@@ -180,6 +208,7 @@ async function refreshLiveRuns() {
     state.connected = true;
     state.bridgeSeen = true;
     state.profiles = Array.isArray(payload.profiles) ? payload.profiles : state.profiles;
+    state.coordination = payload.coordination || state.coordination;
     setFeedStatus("Live local", false);
     const snapshot = JSON.stringify(payload.activities);
     if (snapshot === state.lastSnapshot) return;
@@ -204,7 +233,7 @@ function isValidGroup(group) {
 }
 
 function statusMatches(agent) {
-  if (state.statusFilter === "live") return ACTIVE_STATES.has(agent.state);
+  if (state.statusFilter === "live") return agent.runtime_live === true;
   if (state.statusFilter === "attention") return ATTENTION_STATES.has(agent.state);
   if (state.statusFilter === "past") return PAST_STATES.has(agent.state);
   return true;
@@ -229,6 +258,7 @@ function agentMatches(agent) {
 }
 
 function render() {
+  captureComposerState();
   const focusKey = document.activeElement?.dataset?.focusKey;
   renderGroupList();
   renderZones();
@@ -354,6 +384,7 @@ function createAgentElement(agent) {
   const coat = COATS[agent.coat] || COATS.orange;
 
   element.dataset.agentId = agent.tool_call_id;
+  element.draggable = !agent.is_orchestrator;
   element.classList.add(`state-${agent.state}`);
   element.classList.toggle("is-selected", state.selectedAgentId === agent.tool_call_id);
   element.style.setProperty("--coat", coat[0]);
@@ -424,7 +455,7 @@ function roamAgents() {
   for (const agentElement of elements.zones.querySelectorAll(".agent:not([hidden])")) {
     if (agentElement.matches(":hover") || agentElement.matches(":focus-within")) continue;
     const agent = getAgent(agentElement.dataset.agentId);
-    if (!agent || (!ACTIVE_STATES.has(agent.state) && agent.state !== "idle")) continue;
+    if (!agent?.runtime_live) continue;
     const base = state.positions.get(agent.tool_call_id);
     if (!base) continue;
     const layer = agentElement.parentElement;
@@ -457,6 +488,14 @@ function renderSummary() {
   elements.summaryIdle.textContent = String(
     state.agents.filter((agent) => agent.state === "idle").length,
   );
+  const coordination = state.coordination;
+  if (coordination && elements.coordinationStrip) {
+    const memory = Number(coordination.memory_percent || 0).toFixed(1);
+    elements.coordinationStrip.textContent = `${coordination.agents} isolated agents · ${coordination.queued_messages} queued · ${memory}% context`;
+    if (elements.workspaceBranch) {
+      elements.workspaceBranch.textContent = coordination.integration_branch || "Local branch";
+    }
+  }
 }
 
 function updateEmptyState() {
@@ -524,6 +563,7 @@ function renderDetails() {
   }
 
   const stateMeta = STATE_META[agent.state] || STATE_META.idle;
+  elements.detailContent.classList.toggle("is-chat", state.detailView === "chat");
   for (const action of document.querySelectorAll(
     `[data-agent-id="${CSS.escape(agent.tool_call_id)}"] [data-agent-action]`,
   )) {
@@ -548,7 +588,11 @@ function renderDetails() {
   title.textContent = agent.agent_display_name;
   const source = document.createElement("span");
   source.className = "detail-source";
-  source.textContent = agent.source === "live" ? "Live run" : "Demo data";
+  source.textContent = agent.is_orchestrator
+    ? "Control agent"
+    : agent.runtime_live
+      ? "Isolated worker"
+      : "Past run";
   title.append(source);
   const detailState = document.createElement("span");
   detailState.className = "detail-state";
@@ -587,6 +631,11 @@ function renderDetails() {
   else if (state.detailView === "history") section.append(renderHistoryView(agent));
   else section.append(renderStatusView(agent, stateMeta));
   elements.detailContent.replaceChildren(section);
+  const composer = elements.detailContent.querySelector(".chat-composer textarea");
+  const selection = state.composerSelections.get(agent.tool_call_id);
+  if (composer && selection) {
+    composer.setSelectionRange(selection[0], selection[1]);
+  }
 }
 
 function renderStatusView(agent, stateMeta) {
@@ -623,6 +672,11 @@ function renderStatusView(agent, stateMeta) {
   appendMetric(metrics, formatTokens(promptTokens), "Input tokens");
   appendMetric(metrics, formatTokens(completionTokens), "Output tokens");
   appendMetric(metrics, formatTokens(totalTokens), "Total tokens");
+  appendMetric(
+    metrics,
+    formatMemory(agent.context_tokens, agent.context_limit),
+    "Context memory",
+  );
   appendMetric(metrics, formatCost(agent.estimated_cost_usd), "Estimated cost");
   appendMetric(metrics, formatTimestamp(agent.updated_at), "Last update");
   metricsSection.append(metricsHeading, metrics);
@@ -634,6 +688,7 @@ function renderStatusView(agent, stateMeta) {
   groupLabel.textContent = "Group";
   const groupSelect = document.createElement("select");
   groupSelect.dataset.focusKey = "detail-group";
+  groupSelect.disabled = Boolean(agent.is_orchestrator);
   groupSelect.setAttribute("aria-label", `Move ${agent.agent_display_name} to group`);
   for (const group of state.groups) {
     const option = document.createElement("option");
@@ -650,11 +705,20 @@ function renderStatusView(agent, stateMeta) {
   controlActions.append(
     actionButton("Copy session ID", () => copyText(sessionId)),
   );
-  if (agent.source === "live" && ACTIVE_STATES.has(agent.state)) {
+  if (agent.runtime_live && ACTIVE_STATES.has(agent.state)) {
     controlActions.append(
-      actionButton("Stop run", () => cancelRun(agent.tool_call_id), "button-danger"),
+      actionButton("Cancel response", () => cancelRun(agent.tool_call_id)),
     );
-  } else if (TERMINAL_STATES.has(agent.state)) {
+  }
+  if (agent.runtime_live && !agent.is_orchestrator) {
+    controlActions.append(
+      actionButton("Stop agent", () => stopAgent(agent.tool_call_id), "button-danger"),
+    );
+  } else if (!agent.runtime_live && agent.merge_status === "ready") {
+    controlActions.append(
+      actionButton("Validate & merge", () => mergeAgent(agent.tool_call_id)),
+    );
+  } else if (!agent.runtime_live && !agent.is_orchestrator) {
     controlActions.append(
       actionButton("Relaunch", (event) => relaunchAgent(agent, event.currentTarget)),
     );
@@ -678,6 +742,16 @@ function renderStatusView(agent, stateMeta) {
   appendDetailData(dataGrid, "Started", formatTimestamp(agent.started_at));
   appendDetailData(dataGrid, "Parent session", agent.parent_session_id || "Not reported");
   appendDetailData(dataGrid, "Child session", agent.child_session_id || "Not applicable");
+  appendDetailData(dataGrid, "Branch", agent.branch || "Not applicable");
+  appendDetailData(dataGrid, "Worktree", agent.worktree_path || "Not applicable");
+  appendDetailData(
+    dataGrid,
+    "Worktree state",
+    agent.worktree_dirty
+      ? `${agent.uncommitted_files || 0} uncommitted file(s)`
+      : `${agent.new_commit_count || 0} new commit(s)`,
+  );
+  appendDetailData(dataGrid, "Merge", formatMergeState(agent));
   dataSection.append(dataHeading, dataGrid);
 
   fragment.append(taskSection, metricsSection, groupSection, dataSection);
@@ -686,11 +760,12 @@ function renderStatusView(agent, stateMeta) {
 
 function renderChatView(agent) {
   const section = document.createElement("section");
-  section.className = "detail-section";
+  section.className = "detail-section chat-view";
   const heading = document.createElement("h3");
   heading.textContent = "Conversation";
   const transcript = document.createElement("div");
   transcript.className = "transcript";
+  transcript.dataset.agentTranscript = agent.tool_call_id;
   const messages = Array.isArray(agent.conversation) ? agent.conversation : [];
   if (messages.length === 0) {
     transcript.append(emptyPanel("No conversation has been reported for this run yet."));
@@ -699,32 +774,224 @@ function renderChatView(agent) {
       const bubble = document.createElement("div");
       bubble.className = "message";
       bubble.classList.toggle("is-user", message.role === "user");
+      bubble.classList.toggle("is-system", message.role === "system");
+      if (message.id) bubble.dataset.messageId = message.id;
       const role = document.createElement("strong");
-      role.textContent = message.role === "user" ? "You" : message.role || "Agent";
+      role.textContent =
+        message.role === "user"
+          ? "You"
+          : message.role === "system"
+            ? "Room"
+            : agent.agent_display_name;
       const content = document.createElement("span");
       content.textContent = String(message.content || "");
+      const status = document.createElement("small");
+      status.className = "message-status";
+      status.textContent = formatMessageStatus(message.status);
       bubble.append(role, content);
+      if (message.status && message.status !== "succeeded") bubble.append(status);
       transcript.append(bubble);
     }
   }
-  const actions = document.createElement("div");
-  actions.className = "detail-actions";
-  const sessionId = agent.child_session_id || agent.parent_session_id;
-  actions.append(actionButton("Copy session ID", () => copyText(sessionId)));
-  if (agent.source === "live" && agent.resumable) {
-    actions.append(
-      actionButton("Copy resume command", () =>
-        copyText(`uv run vibe --resume ${sessionId}`),
-      ),
-    );
+
+  const pendingApprovals = (agent.approvals || []).filter(
+    (approval) => approval.status === "pending",
+  );
+  for (const approval of pendingApprovals) {
+    transcript.append(renderApprovalRequest(agent, approval));
   }
-  const notice = document.createElement("p");
-  notice.className = "bridge-notice";
-  notice.textContent = agent.resumable
-    ? "Use the resume command to continue this session in Vibe."
-    : "The live transcript is read-only while the programmatic run is active.";
-  section.append(heading, transcript, actions, notice);
+  const pendingQuestions = (agent.questions || []).filter(
+    (question) => question.status === "pending",
+  );
+  for (const question of pendingQuestions) {
+    transcript.append(renderQuestionRequest(agent, question));
+  }
+
+  section.append(heading, transcript);
+  const chatError = state.chatErrors.get(agent.tool_call_id);
+  if (chatError) {
+    const error = document.createElement("p");
+    error.className = "chat-error";
+    error.setAttribute("role", "alert");
+    error.textContent = chatError;
+    section.append(error);
+  }
+  if (agent.runtime_live && state.connected) {
+    section.append(renderComposer(agent));
+  } else {
+    const notice = document.createElement("p");
+    notice.className = "bridge-notice";
+    notice.textContent = "This transcript is retained, but the worker is stopped.";
+    section.append(notice);
+  }
   return section;
+}
+
+function renderComposer(agent) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "composer-wrap";
+  const commandMenu = document.createElement("div");
+  commandMenu.className = "command-menu";
+  commandMenu.hidden = true;
+  commandMenu.setAttribute("role", "listbox");
+  const form = document.createElement("form");
+  form.className = "chat-composer";
+  const textarea = document.createElement("textarea");
+  textarea.rows = 2;
+  textarea.maxLength = 8000;
+  textarea.placeholder = agent.is_orchestrator
+    ? "Message the orchestrator"
+    : `Message ${agent.agent_display_name}`;
+  textarea.value = state.chatDrafts.get(agent.tool_call_id) || "";
+  textarea.dataset.focusKey = `chat-composer:${agent.tool_call_id}`;
+  textarea.setAttribute("aria-label", textarea.placeholder);
+  const send = document.createElement("button");
+  send.type = "submit";
+  send.className = "button button-orange composer-send";
+  send.textContent = "Send";
+  send.disabled = state.pendingRequests.has(agent.tool_call_id) || !textarea.value.trim();
+
+  const updateCommandMenu = () => {
+    const query = textarea.value.trim().toLowerCase();
+    const commands = ["/help", "/status", "/history", "/queue", "/cancel", "/stop", "/retry"];
+    const matches = query.startsWith("/") && !query.startsWith("//")
+      ? commands.filter((command) => command.startsWith(query.split(" ")[0]))
+      : [];
+    commandMenu.replaceChildren();
+    commandMenu.hidden = matches.length === 0;
+    for (const command of matches) {
+      const option = document.createElement("button");
+      option.type = "button";
+      option.setAttribute("role", "option");
+      option.textContent = command;
+      option.addEventListener("click", () => {
+        textarea.value = command;
+        state.chatDrafts.set(agent.tool_call_id, command);
+        commandMenu.hidden = true;
+        send.disabled = false;
+        textarea.focus();
+      });
+      commandMenu.append(option);
+    }
+  };
+  textarea.addEventListener("input", () => {
+    state.chatDrafts.set(agent.tool_call_id, textarea.value);
+    send.disabled = state.pendingRequests.has(agent.tool_call_id) || !textarea.value.trim();
+    updateCommandMenu();
+  });
+  textarea.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !commandMenu.hidden) {
+      commandMenu.hidden = true;
+      event.stopPropagation();
+      return;
+    }
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+      event.preventDefault();
+      form.requestSubmit();
+    }
+  });
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void sendAgentMessage(agent.tool_call_id, textarea.value);
+  });
+  form.append(textarea, send);
+  const queue = document.createElement("div");
+  queue.className = "composer-meta";
+  queue.textContent = agent.queued_messages
+    ? `${agent.queued_messages} queued`
+    : agent.state === "failed"
+      ? "Ready to retry"
+      : "Ready";
+  if (ACTIVE_STATES.has(agent.state)) {
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "button composer-cancel";
+    cancel.textContent = "Cancel response";
+    cancel.addEventListener("click", () => void cancelRun(agent.tool_call_id));
+    queue.append(cancel);
+  }
+  wrapper.append(commandMenu, form, queue);
+  updateCommandMenu();
+  return wrapper;
+}
+
+function renderApprovalRequest(agent, approval) {
+  const card = document.createElement("section");
+  card.className = "approval-request";
+  const title = document.createElement("strong");
+  title.textContent = `${approval.tool_name || "Tool"} needs approval`;
+  const args = document.createElement("pre");
+  args.textContent = JSON.stringify(approval.arguments || {}, null, 2);
+  const permissions = document.createElement("p");
+  permissions.textContent = (approval.permissions || [])
+    .map((permission) => permission.label || permission.pattern)
+    .filter(Boolean)
+    .join(" · ");
+  const actions = document.createElement("div");
+  actions.className = "approval-actions";
+  const approve = actionButton("Approve once", () =>
+    resolveApproval(agent.tool_call_id, approval.id, "approve_once"),
+  );
+  const deny = actionButton(
+    "Deny",
+    () => resolveApproval(agent.tool_call_id, approval.id, "deny"),
+    "button-danger",
+  );
+  actions.append(approve, deny);
+  card.append(title, args);
+  if (permissions.textContent) card.append(permissions);
+  card.append(actions);
+  return card;
+}
+
+function renderQuestionRequest(agent, request) {
+  const form = document.createElement("form");
+  form.className = "question-request";
+  const answers = [];
+  for (const [index, question] of (request.questions || []).entries()) {
+    const fieldset = document.createElement("fieldset");
+    const legend = document.createElement("legend");
+    legend.textContent = question.question;
+    fieldset.append(legend);
+    const select = document.createElement("select");
+    select.setAttribute("aria-label", question.question);
+    select.required = true;
+    for (const optionData of question.options || []) {
+      const option = document.createElement("option");
+      option.value = optionData.label;
+      option.textContent = optionData.label;
+      select.append(option);
+    }
+    const other = document.createElement("option");
+    other.value = "__other__";
+    other.textContent = "Other";
+    if (!question.hide_other) select.append(other);
+    const custom = document.createElement("input");
+    custom.placeholder = "Your answer";
+    custom.hidden = select.value !== "__other__";
+    select.addEventListener("change", () => {
+      custom.hidden = select.value !== "__other__";
+      custom.required = !custom.hidden;
+    });
+    answers.push({ question, select, custom, index });
+    fieldset.append(select, custom);
+    form.append(fieldset);
+  }
+  const submit = document.createElement("button");
+  submit.type = "submit";
+  submit.className = "button button-orange";
+  submit.textContent = "Answer";
+  form.append(submit);
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const payload = answers.map(({ question, select, custom }) => ({
+      question: question.question,
+      answer: select.value === "__other__" ? custom.value : select.value,
+      is_other: select.value === "__other__",
+    }));
+    void answerQuestion(agent.tool_call_id, request.id, payload);
+  });
+  return form;
 }
 
 function renderHistoryView(agent) {
@@ -794,6 +1061,31 @@ function formatTokens(value) {
   return Number.isFinite(value) ? Number(value).toLocaleString() : "Not reported";
 }
 
+function formatMemory(used, limit) {
+  if (!Number.isFinite(used) || !Number.isFinite(limit) || limit <= 0) {
+    return "Not reported";
+  }
+  return `${Number(used).toLocaleString()} / ${Number(limit).toLocaleString()} (${((used / limit) * 100).toFixed(1)}%)`;
+}
+
+function formatMessageStatus(status) {
+  return {
+    queued: "Queued",
+    running: "Running",
+    failed: "Failed",
+    cancelled: "Cancelled",
+  }[status] || "";
+}
+
+function formatMergeState(agent) {
+  if (agent.merge_status === "merged") return `Merged ${shortId(agent.merge_commit || "")}`;
+  if (agent.merge_status === "failed") return agent.merge_error || "Validation failed";
+  if (agent.merge_status === "ready") return "Ready to validate";
+  if (agent.worktree_dirty) return "Commit changes first";
+  if (agent.runtime_live) return "Stop agent before merge";
+  return "No committed changes";
+}
+
 function formatCost(value) {
   return Number.isFinite(value) ? `$${Number(value).toFixed(4)}` : "Not reported";
 }
@@ -819,6 +1111,111 @@ async function cancelRun(agentId) {
     body: "{}",
   });
   if (response.ok) await refreshLiveRuns();
+}
+
+async function stopAgent(agentId) {
+  await postAgentAction(agentId, "stop", {});
+}
+
+async function mergeAgent(agentId) {
+  await postAgentAction(agentId, "merge", {});
+}
+
+async function sendAgentMessage(agentId, rawContent) {
+  const content = rawContent.trim();
+  if (!content || state.pendingRequests.has(agentId)) return;
+  const agent = getAgent(agentId);
+  if (!agent?.runtime_live) return;
+  const clientMessageId = crypto.randomUUID();
+  const optimistic = {
+    id: `optimistic-${clientMessageId}`,
+    client_message_id: clientMessageId,
+    role: "user",
+    content,
+    status: "queued",
+    created_at: Date.now() / 1000,
+  };
+  agent.conversation = [...(agent.conversation || []), optimistic];
+  state.chatDrafts.set(agentId, "");
+  state.chatErrors.delete(agentId);
+  state.pendingRequests.add(agentId);
+  renderDetails();
+  try {
+    const response = await fetch(
+      `/api/agent-runs/${encodeURIComponent(agentId)}/messages`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content, client_message_id: clientMessageId }),
+      },
+    );
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || `Send failed (${response.status})`);
+    state.lastSnapshot = "";
+    await refreshLiveRuns();
+  } catch (error) {
+    optimistic.status = "failed";
+    state.chatDrafts.set(agentId, content);
+    state.chatErrors.set(agentId, error.message);
+  } finally {
+    state.pendingRequests.delete(agentId);
+    if (state.selectedAgentId === agentId && state.detailView === "chat") {
+      renderDetails();
+      requestAnimationFrame(() =>
+        elements.detailContent
+          .querySelector(`[data-focus-key="chat-composer:${CSS.escape(agentId)}"]`)
+          ?.focus(),
+      );
+    }
+  }
+}
+
+async function resolveApproval(agentId, approvalId, decision) {
+  await postAgentAction(agentId, `approvals/${encodeURIComponent(approvalId)}`, {
+    decision,
+  });
+}
+
+async function answerQuestion(agentId, questionId, answers) {
+  await postAgentAction(agentId, `questions/${encodeURIComponent(questionId)}`, {
+    answers,
+  });
+}
+
+async function postAgentAction(agentId, action, body) {
+  const requestKey = `${agentId}:${action}`;
+  if (state.pendingRequests.has(requestKey)) return;
+  state.pendingRequests.add(requestKey);
+  state.chatErrors.delete(agentId);
+  try {
+    const response = await fetch(
+      `/api/agent-runs/${encodeURIComponent(agentId)}/${action}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    );
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || `Action failed (${response.status})`);
+    state.lastSnapshot = "";
+    await refreshLiveRuns();
+  } catch (error) {
+    state.chatErrors.set(agentId, error.message);
+    if (state.selectedAgentId === agentId) renderDetails();
+  } finally {
+    state.pendingRequests.delete(requestKey);
+  }
+}
+
+function captureComposerState() {
+  const composer = elements.detailContent.querySelector(".chat-composer textarea");
+  if (!composer || !state.selectedAgentId) return;
+  state.chatDrafts.set(state.selectedAgentId, composer.value);
+  state.composerSelections.set(state.selectedAgentId, [
+    composer.selectionStart,
+    composer.selectionEnd,
+  ]);
 }
 
 function relaunchAgent(agent, origin) {
@@ -997,8 +1394,12 @@ function updateAgentLaunchNotice() {
       "This page is using demo data. Start server.py to enable real Vibe runs.";
     return;
   }
+  const profile = state.profiles.find(
+    (candidate) => candidate.name === elements.agentProfile.value,
+  );
+  const safety = profile?.safety ? ` ${profile.safety} permissions.` : "";
   elements.agentDialogNotice.textContent =
-    "This launches a real local Vibe run with bounded turns, tokens, cost, and runtime.";
+    `A dedicated Git worktree, branch, and persistent Vibe process will be created.${safety}`;
 }
 
 async function createAgentRun() {
@@ -1014,6 +1415,7 @@ async function createAgentRun() {
         display_name: elements.agentName.value.trim(),
         task: elements.agentTask.value.trim(),
         group_id: elements.agentGroup.value,
+        client_message_id: crypto.randomUUID(),
       }),
     });
     const payload = await response.json();

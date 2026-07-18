@@ -490,9 +490,10 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self.session_logger = SessionLogger(config.session_logging, self.session_id)
         self._hook_config_result = hook_config_result
         self._agent_supervisor: AgentSupervisor | None = None
-        self._managed_agent_lifecycle_listener: (
-            ManagedAgentLifecycleListener | None
-        ) = None
+        self._external_agent_management: AgentManagementPort | None = None
+        self._managed_agent_lifecycle_listener: ManagedAgentLifecycleListener | None = (
+            None
+        )
         self._hooks_manager = (
             HooksManager(hook_config_result.hooks) if hook_config_result else None
         )
@@ -681,9 +682,13 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
         self._interactive_surface_capabilities_enabled = True
         self.agent_manager.invalidate_config()
 
+    def set_agent_management_port(self, management: AgentManagementPort | None) -> None:
+        """Override local child management for an interactive host surface."""
+        self._external_agent_management = management
+
     @property
     def agent_management(self) -> AgentManagementPort:
-        return self._get_agent_supervisor()
+        return self._external_agent_management or self._get_agent_supervisor()
 
     def _get_agent_supervisor(self) -> AgentSupervisor:
         if not self.config.enable_agent_management:
@@ -700,9 +705,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 launch_context=self.launch_context,
                 hook_config_result=self._hook_config_result,
             )
-            supervisor.set_lifecycle_listener(
-                self._managed_agent_lifecycle_listener
-            )
+            supervisor.set_lifecycle_listener(self._managed_agent_lifecycle_listener)
             self._agent_supervisor = supervisor
         return self._agent_supervisor
 
@@ -1943,7 +1946,7 @@ class AgentLoop(AgentLoopHooksMixin):  # noqa: PLR0904
                 session_id=self.session_id,
                 mcp_pool=self._mcp_pool,
                 agent_management=(
-                    self._get_agent_supervisor()
+                    self.agent_management
                     if self.config.enable_agent_management
                     else None
                 ),
