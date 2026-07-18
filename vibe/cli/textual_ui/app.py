@@ -2870,15 +2870,16 @@ class VibeApp(App):  # noqa: PLR0904
                 return (ApprovalResponse.YES, None)
 
         async with self._user_interaction_lock:
+            self._pending_approval = asyncio.Future()
             self._show_workspace(WorkspaceView.CHAT)
             if managed_context is None:
                 self._set_primary_activity(
                     AgentRunState.ATTENTION, f"Approval needed for {tool}"
                 )
-            await self._wait_for_typing_pause()
-            self._pending_approval = asyncio.Future()
-            self._terminal_notifier.notify(NotificationContext.ACTION_REQUIRED)
             try:
+                await self._wait_for_typing_pause()
+                self._show_workspace(WorkspaceView.CHAT)
+                self._terminal_notifier.notify(NotificationContext.ACTION_REQUIRED)
                 with paused_timer(self._loading_widget):
                     await self._switch_to_approval_app(tool, args, required_permissions)
                     result = await self._pending_approval
@@ -2894,13 +2895,14 @@ class VibeApp(App):  # noqa: PLR0904
         question_args = cast(AskUserQuestionArgs, args)
 
         async with self._user_interaction_lock:
+            self._pending_question = asyncio.Future()
             self._show_workspace(WorkspaceView.CHAT)
             if managed_context is None:
                 self._set_primary_activity(AgentRunState.ATTENTION, "Question pending")
-            await self._wait_for_typing_pause()
-            self._pending_question = asyncio.Future()
-            self._terminal_notifier.notify(NotificationContext.ACTION_REQUIRED)
             try:
+                await self._wait_for_typing_pause()
+                self._show_workspace(WorkspaceView.CHAT)
+                self._terminal_notifier.notify(NotificationContext.ACTION_REQUIRED)
                 with paused_timer(self._loading_widget):
                     await self._switch_to_question_app(question_args)
                     result = await self._pending_question

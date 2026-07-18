@@ -24,6 +24,7 @@ from vibe.cli.textual_ui.workspace.models import AgentRunState, WorkspaceView
 from vibe.cli.textual_ui.workspace.navigation import WorkspaceNavigation
 from vibe.cli.textual_ui.workspace.pages import AgentsPage, HomePage, OfficePage
 from vibe.core.config import MCPStdio
+from vibe.core.control_port import CLINavigateWorkspaceRequest, WorkspaceDestination
 from vibe.core.tools.builtins.ask_user_question import (
     AskUserQuestionArgs,
     Choice,
@@ -379,24 +380,44 @@ async def test_shift_tab_does_not_switch_agent_outside_visible_chat() -> None:
 async def test_approval_keeps_chat_visible_during_workspace_navigation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("VIBE_TYPING_GRACE_PERIOD_MS", "0")
     app = build_test_vibe_app()
+    typing_pause_started = asyncio.Event()
+    release_typing_pause = asyncio.Event()
+
+    async def wait_for_typing_pause() -> None:
+        typing_pause_started.set()
+        await release_typing_pause.wait()
+
+    monkeypatch.setattr(app, "_wait_for_typing_pause", wait_for_typing_pause)
 
     async with app.run_test(size=(120, 36)) as pilot:
         pending = asyncio.create_task(
             app._approval_callback("bash", _ApprovalArgs(), "call-1", None)
         )
-        await pilot.pause()
-        assert app.query_one(ApprovalApp).is_on_screen
+        await typing_pause_started.wait()
+        assert app._pending_approval is not None
+        assert not app._pending_approval.done()
 
         await pilot.press("ctrl+3")
-        app.action_show_workspace(WorkspaceView.USAGE.value)
+        assert app._workspace_view is WorkspaceView.CHAT
+        assert app.query_one(ContentSwitcher).current == "workspace-chat"
+
         navigation = app.query_one(WorkspaceNavigation)
         assert await pilot.click(navigation, offset=(3, 3))
-        await pilot.pause()
+        assert app._workspace_view is WorkspaceView.CHAT
+        assert app.query_one(ContentSwitcher).current == "workspace-chat"
+
+        await app._cli_control.defer(
+            CLINavigateWorkspaceRequest(destination=WorkspaceDestination.USAGE)
+        )
+        await app._apply_deferred_cli_control()
 
         assert app._workspace_view is WorkspaceView.CHAT
         assert app.query_one(ContentSwitcher).current == "workspace-chat"
+
+        release_typing_pause.set()
+        await pilot.pause()
+
         assert app.query_one(ApprovalApp).is_on_screen
         assert app._current_bottom_app is BottomApp.Approval
 
@@ -409,8 +430,15 @@ async def test_approval_keeps_chat_visible_during_workspace_navigation(
 async def test_question_keeps_chat_visible_during_binding_and_rail_click(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("VIBE_TYPING_GRACE_PERIOD_MS", "0")
     app = build_test_vibe_app()
+    typing_pause_started = asyncio.Event()
+    release_typing_pause = asyncio.Event()
+
+    async def wait_for_typing_pause() -> None:
+        typing_pause_started.set()
+        await release_typing_pause.wait()
+
+    monkeypatch.setattr(app, "_wait_for_typing_pause", wait_for_typing_pause)
     args = AskUserQuestionArgs(
         questions=[
             Question(
@@ -423,16 +451,30 @@ async def test_question_keeps_chat_visible_during_binding_and_rail_click(
 
     async with app.run_test(size=(120, 36)) as pilot:
         pending = asyncio.create_task(app._user_input_callback(args))
-        await pilot.pause()
-        assert app.query_one(QuestionApp).is_on_screen
+        await typing_pause_started.wait()
+        assert app._pending_question is not None
+        assert not app._pending_question.done()
 
         await pilot.press("ctrl+5")
+        assert app._workspace_view is WorkspaceView.CHAT
+        assert app.query_one(ContentSwitcher).current == "workspace-chat"
+
         navigation = app.query_one(WorkspaceNavigation)
         assert await pilot.click(navigation, offset=(3, 3))
-        await pilot.pause()
+        assert app._workspace_view is WorkspaceView.CHAT
+        assert app.query_one(ContentSwitcher).current == "workspace-chat"
+
+        await app._cli_control.defer(
+            CLINavigateWorkspaceRequest(destination=WorkspaceDestination.USAGE)
+        )
+        await app._apply_deferred_cli_control()
 
         assert app._workspace_view is WorkspaceView.CHAT
         assert app.query_one(ContentSwitcher).current == "workspace-chat"
+
+        release_typing_pause.set()
+        await pilot.pause()
+
         assert app.query_one(QuestionApp).is_on_screen
         assert app._current_bottom_app is BottomApp.Question
 

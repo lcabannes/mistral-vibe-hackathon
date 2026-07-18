@@ -65,7 +65,7 @@ def _deferred_turn(
 
 
 def _managed_event(session_id: str) -> ManagedAgentLifecycleEvent:
-    event = ManagedAgentLifecycleEvent(
+    return ManagedAgentLifecycleEvent(
         sequence=3,
         agent_id="worker-1",
         profile="explore",
@@ -75,15 +75,11 @@ def _managed_event(session_id: str) -> ManagedAgentLifecycleEvent:
         state=ManagedAgentState.IDLE,
         current_activity=None,
         queued_messages=0,
+        task="Inspect the repository",
+        last_response="The relevant code is in app.py.",
+        error=None,
+        usage=LLMUsage(prompt_tokens=20, completion_tokens=5),
     )
-    for name, value in {
-        "task": "Inspect the repository",
-        "last_response": "The relevant code is in app.py.",
-        "error": None,
-        "usage": LLMUsage(prompt_tokens=20, completion_tokens=5),
-    }.items():
-        object.__setattr__(event, name, value)
-    return event
 
 
 @pytest.mark.asyncio

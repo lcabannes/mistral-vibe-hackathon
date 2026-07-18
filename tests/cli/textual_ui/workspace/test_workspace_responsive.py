@@ -53,9 +53,7 @@ async def test_narrow_home_exposes_every_live_attention_in_local_scroll() -> Non
         assert action.option_count == len(attention)
         assert {
             action.get_option_at_index(index).id for index in range(action.option_count)
-        } == {
-            f"action-{activity.tool_call_id.encode().hex()}" for activity in attention
-        }
+        } == {f"action-{activity.activity_id.encode().hex()}" for activity in attention}
         assert action.virtual_size.height > action.size.height
         assert action.region.bottom <= home.region.bottom
         assert "2 recent fail" in str(home.query_one("#home-overview", Static).render())

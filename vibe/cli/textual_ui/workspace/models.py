@@ -61,6 +61,14 @@ class AgentActivity(BaseModel):
     def is_managed(self) -> bool:
         return self.managed_agent_id is not None
 
+    @property
+    def activity_id(self) -> str:
+        if self.is_primary:
+            return f"primary:{self.parent_session_id}"
+        if self.managed_agent_id is not None:
+            return f"managed:{self.managed_agent_id}"
+        return f"task:{self.tool_call_id}"
+
 
 class AgentActivitySnapshot(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)

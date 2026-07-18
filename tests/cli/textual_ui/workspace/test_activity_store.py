@@ -100,7 +100,7 @@ def _managed(
     error: str | None = None,
     usage: LLMUsage | None = None,
 ) -> ManagedAgentLifecycleEvent:
-    event = ManagedAgentLifecycleEvent(
+    return ManagedAgentLifecycleEvent(
         sequence=sequence,
         agent_id=agent_id,
         profile="explore",
@@ -110,15 +110,11 @@ def _managed(
         state=state,
         current_activity=activity,
         queued_messages=2,
+        task=task,
+        last_response=last_response,
+        error=error,
+        usage=usage,
     )
-    for name, value in {
-        "task": task,
-        "last_response": last_response,
-        "error": error,
-        "usage": usage,
-    }.items():
-        object.__setattr__(event, name, value)
-    return event
 
 
 def test_duplicate_streaming_calls_upsert_one_activity(clock: Iterator[float]) -> None:
@@ -406,10 +402,15 @@ def test_managed_worker_can_restart_until_stopped(clock: Iterator[float]) -> Non
     assert store.snapshot.activities[0].state is AgentRunState.STOPPED
 
 
-def test_managed_and_task_internal_ids_do_not_overwrite(clock: Iterator[float]) -> None:
+def test_managed_and_task_public_ids_do_not_collide(clock: Iterator[float]) -> None:
     store = AgentActivityStore("parent", clock=lambda: next(clock))
     store.apply(_call("managed:worker-1", TaskArgs(task="one-shot")))
     store.apply(_managed(ManagedAgentState.RUNNING))
 
-    assert len(store.snapshot.activities) == 2
-    assert {item.is_managed for item in store.snapshot.activities} == {False, True}
+    activities = store.snapshot.activities
+    assert len(activities) == 2
+    assert {item.is_managed for item in activities} == {False, True}
+    assert {item.activity_id for item in activities} == {
+        "task:managed:worker-1",
+        "managed:worker-1",
+    }
