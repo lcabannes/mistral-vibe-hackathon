@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from vibe.core.agents.events import ManagedAgentLifecycleEvent
-from vibe.core.agents.management_port import ManagedAgentLifecycleListener
 from vibe.core.agents.manager import AgentManager
 from vibe.core.agents.models import (
     ACCEPT_EDITS,
@@ -33,7 +32,6 @@ __all__ = [
     "AgentType",
     "BuiltinAgentName",
     "ManagedAgentLifecycleEvent",
-    "ManagedAgentLifecycleListener",
     "ManagedAgentSnapshot",
     "ManagedAgentState",
 ]
