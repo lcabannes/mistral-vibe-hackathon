@@ -2,12 +2,19 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncGenerator
+from typing import Any, cast
 from unittest.mock import AsyncMock
 
 from pydantic import BaseModel
 import pytest
 
-from tests.conftest import build_test_agent_loop, build_test_vibe_app
+from tests.conftest import (
+    build_test_agent_loop,
+    build_test_vibe_app,
+    build_test_vibe_config,
+)
+from tests.mock.utils import mock_llm_chunk
+from tests.stubs.fake_backend import FakeBackend
 import vibe.cli.textual_ui.app as app_module
 from vibe.cli.textual_ui.widgets.approval_app import ApprovalApp
 from vibe.cli.textual_ui.workspace.models import AgentRunState, WorkspaceView
@@ -16,7 +23,9 @@ from vibe.core.agents.events import (
     ManagedAgentCallbackContext,
     ManagedAgentLifecycleEvent,
 )
-from vibe.core.agents.models import BuiltinAgentName, ManagedAgentState
+from vibe.core.agents.models import AgentType, BuiltinAgentName, ManagedAgentState
+from vibe.core.agents.supervisor import AgentSupervisor
+from vibe.core.config import SessionLoggingConfig
 from vibe.core.control_port import (
     CLICommandRequest,
     CLINavigateWorkspaceRequest,
@@ -24,7 +33,16 @@ from vibe.core.control_port import (
     WorkspaceDestination,
 )
 from vibe.core.session.resume_sessions import ResumeSessionInfo
-from vibe.core.types import BaseEvent, LLMUsage
+from vibe.core.tools.base import ToolPermission
+from vibe.core.tools.permissions import PermissionStore
+from vibe.core.types import (
+    ApprovalResponse,
+    BaseEvent,
+    FunctionCall,
+    LLMChunk,
+    LLMUsage,
+    ToolCall,
+)
 
 
 class _ApprovalArgs(BaseModel):
@@ -156,6 +174,76 @@ async def test_managed_approval_uses_chat_lock_without_mutating_primary(
         pending.cancel()
         with pytest.raises(asyncio.CancelledError):
             await pending
+
+
+@pytest.mark.asyncio
+async def test_managed_ask_does_not_inherit_primary_auto_approve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release_tool_call = asyncio.Event()
+    children = []
+    app = build_test_vibe_app(
+        agent_loop=build_test_agent_loop(agent_name=BuiltinAgentName.ORCHESTRATOR)
+    )
+
+    def factory(profile: str, _agent_type: AgentType, logging: SessionLoggingConfig):
+        config = build_test_vibe_config(
+            enabled_tools=["todo"],
+            tools={"todo": {"permission": ToolPermission.ASK.value}},
+        )
+        config.session_logging = logging
+        tool_call = ToolCall(
+            id="managed-todo",
+            index=0,
+            function=FunctionCall(name="todo", arguments='{"action":"read"}'),
+        )
+        backend = FakeBackend([
+            [mock_llm_chunk(content="Checking todos.", tool_calls=[tool_call])],
+            [mock_llm_chunk(content="Done.")],
+        ])
+        complete = backend.complete
+
+        async def gated_complete(**kwargs: Any) -> LLMChunk:
+            await release_tool_call.wait()
+            return await complete(**kwargs)
+
+        monkeypatch.setattr(backend, "complete", gated_complete)
+        child = build_test_agent_loop(
+            config=config,
+            agent_name=profile,
+            backend=backend,
+            permission_store=PermissionStore(),
+        )
+        children.append(child)
+        return child
+
+    async with app.run_test() as pilot:
+        await app._stop_managed_agent_events()
+        supervisor = cast(AgentSupervisor, app.agent_loop.agent_management)
+        monkeypatch.setattr(supervisor, "_loop_factory", factory)
+        managed = await supervisor.start("default", "Check todos")
+
+        await app._switch_to_agent(BuiltinAgentName.AUTO_APPROVE)
+        assert app.config.bypass_tool_permissions
+        release_tool_call.set()
+
+        for _ in range(20):
+            await pilot.pause(0.05)
+            if app._pending_approval is not None:
+                break
+
+        assert app._pending_approval is not None
+        assert app.query_one(ApprovalApp).is_on_screen
+        assert app._activity_store.snapshot.activities[0].state is AgentRunState.IDLE
+
+        app._pending_approval.set_result((ApprovalResponse.NO, None))
+        for _ in range(20):
+            await pilot.pause(0.05)
+            if app._pending_approval is None:
+                break
+        assert app._pending_approval is None
+        assert children[0].stats.tool_calls_agreed == 0
+        await supervisor.stop(managed.agent_id)
 
 
 @pytest.mark.asyncio

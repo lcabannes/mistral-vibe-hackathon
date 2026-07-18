@@ -2860,9 +2860,12 @@ class VibeApp(App):  # noqa: PLR0904
         required_permissions: list[RequiredPermission] | None,
     ) -> tuple[ApprovalResponse, str | None]:
         managed_context = get_managed_agent_callback_context()
-        # Auto-approve only if parent is in auto-approve mode AND tool is enabled
-        # This ensures subagents respect the main agent's tool restrictions
-        if self.agent_loop and self.agent_loop.config.bypass_tool_permissions:
+        # A managed child reaches this callback only after resolving its own ASK policy.
+        if (
+            managed_context is None
+            and self.agent_loop
+            and self.agent_loop.config.bypass_tool_permissions
+        ):
             if self._is_tool_enabled_in_main_agent(tool):
                 return (ApprovalResponse.YES, None)
 
