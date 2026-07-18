@@ -54,11 +54,16 @@ def _next_wall_clock(
         raise TaskScheduleError(f"Unknown timezone: {trigger.timezone}") from error
 
     local_after = after.astimezone(zone)
-    for offset in range(8):
+    for offset in range(15):
         candidate_date = local_after.date() + timedelta(days=offset)
         if weekdays is not None and candidate_date.weekday() not in weekdays:
             continue
         candidate = _resolve_local_wall_time(candidate_date, trigger.at, zone)
+        if (
+            weekdays is not None
+            and candidate.astimezone(zone).weekday() not in weekdays
+        ):
+            continue
         candidate_utc = candidate.astimezone(UTC)
         if candidate_utc > after:
             return candidate_utc

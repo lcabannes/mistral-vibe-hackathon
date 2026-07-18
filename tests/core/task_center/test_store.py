@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 import tomllib
 
 import pytest
 
 from vibe.core.task_center import (
+    AppStartTrigger,
+    DailyTrigger,
     IntervalTrigger,
+    ManualTrigger,
+    SessionStartTrigger,
+    TaskCenterDocument,
     TaskConflictError,
     TaskCreate,
     TaskDefinition,
@@ -23,6 +28,8 @@ from vibe.core.task_center import (
     TaskStoreWriteError,
     TaskTriggerKind,
     TaskUpdate,
+    Weekday,
+    WeeklyTrigger,
     store as store_module,
 )
 
@@ -73,6 +80,34 @@ async def test_crud_round_trip_and_assignment_clear(tmp_path, task_ids) -> None:
     assert await store.list() == ()
     with pytest.raises(TaskNotFoundError):
         await store.get(created.task_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "trigger",
+    [
+        ManualTrigger(),
+        AppStartTrigger(),
+        SessionStartTrigger(),
+        IntervalTrigger(interval_seconds=90),
+        DailyTrigger(at=time(9, 30), timezone="Europe/Paris"),
+        WeeklyTrigger(
+            at=time(10), timezone="UTC", weekdays=(Weekday.MONDAY, Weekday.FRIDAY)
+        ),
+    ],
+)
+async def test_every_trigger_kind_can_be_edited_and_reloaded(
+    tmp_path, task_ids, trigger
+) -> None:
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    store = _store(tmp_path, task_ids, now)
+    task = await store.create(TaskCreate(title="Task"))
+
+    updated = await store.update(task.task_id, TaskUpdate(trigger=trigger))
+    reloaded = (await TaskStore(store.path).load())[0]
+
+    assert updated.trigger == trigger
+    assert reloaded.trigger == trigger
 
 
 @pytest.mark.asyncio
@@ -154,6 +189,19 @@ async def test_corruption_and_unknown_version_are_safe_errors(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_read_rejects_symlinked_task_center_parent(tmp_path, task_ids) -> None:
+    external = tmp_path / "external"
+    external_store = _store(external, task_ids, datetime(2026, 1, 1, tzinfo=UTC))
+    await external_store.create(TaskCreate(title="External"))
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / ".vibe").symlink_to(external / ".vibe", target_is_directory=True)
+
+    with pytest.raises(TaskStoreReadError, match="Unsafe Task Center directory"):
+        await TaskStore(project_root=project).load()
+
+
+@pytest.mark.asyncio
 async def test_atomic_replace_failure_preserves_previous_file(
     tmp_path, task_ids, monkeypatch
 ) -> None:
@@ -201,6 +249,31 @@ async def test_duplicate_ids_are_rejected(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_duplicate_run_ids_are_rejected(tmp_path, task_ids) -> None:
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    store = _store(tmp_path, task_ids, now)
+    task = await store.create(TaskCreate(title="Task"))
+    first = TaskRunRecord(
+        run_id=f"run_{1:032x}",
+        trigger_instance_id="first",
+        trigger_kind=TaskTriggerKind.MANUAL,
+        state=TaskRunState.READY,
+        triggered_at=now,
+    )
+    await store.record_trigger(task.task_id, first, next_run_at=None)
+    await store.record_handoff(
+        task.task_id,
+        first.run_id,
+        state=TaskRunState.COMPLETED,
+        authorization=TaskExecutionAuthorization.ASK,
+    )
+    duplicate = first.model_copy(update={"trigger_instance_id": "second"})
+
+    with pytest.raises(TaskConflictError, match="run already exists"):
+        await store.record_trigger(task.task_id, duplicate, next_run_at=None)
+
+
+@pytest.mark.asyncio
 async def test_run_history_is_bounded(tmp_path, task_ids) -> None:
     now = datetime(2026, 1, 1, tzinfo=UTC)
     store = _store(tmp_path, task_ids, now)
@@ -215,9 +288,130 @@ async def test_run_history_is_bounded(tmp_path, task_ids) -> None:
             triggered_at=now + timedelta(seconds=index),
         )
         await store.record_trigger(task.task_id, run, next_run_at=None)
+        await store.record_handoff(
+            task.task_id,
+            run.run_id,
+            state=TaskRunState.COMPLETED,
+            authorization=TaskExecutionAuthorization.ASK,
+        )
 
-    history = (await store.get(task.task_id)).run_history
+    persisted = await store.get(task.task_id)
+    history = persisted.run_history
     assert len(history) == 20
     assert history[0].trigger_instance_id == "manual-5"
     assert history[-1].trigger_instance_id == "manual-24"
-    assert (await store.get(task.task_id)).state is TaskState.READY
+    assert len(persisted.trigger_index) == 25
+    assert persisted.state is TaskState.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_active_run_prevents_overlap_and_remains_completable(
+    tmp_path, task_ids
+) -> None:
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    store = _store(tmp_path, task_ids, now)
+    task = await store.create(TaskCreate(title="Task"))
+    active = TaskRunRecord(
+        run_id=f"run_{1:032x}",
+        trigger_instance_id="active",
+        trigger_kind=TaskTriggerKind.MANUAL,
+        state=TaskRunState.RUNNING,
+        triggered_at=now,
+    )
+    assert (await store.record_trigger(task.task_id, active, next_run_at=None)).created
+    await store.record_handoff(
+        task.task_id,
+        active.run_id,
+        state=TaskRunState.RUNNING,
+        authorization=TaskExecutionAuthorization.ALWAYS,
+        managed_agent_id="worker-1",
+    )
+
+    for index in range(25):
+        overlapping = TaskRunRecord(
+            run_id=f"run_{index + 2:032x}",
+            trigger_instance_id=f"overlap-{index}",
+            trigger_kind=TaskTriggerKind.MANUAL,
+            state=TaskRunState.READY,
+            triggered_at=now + timedelta(seconds=index + 1),
+        )
+        result = await store.record_trigger(task.task_id, overlapping, next_run_at=None)
+        assert not result.created
+        assert result.blocked_by_active_run
+
+    persisted = await store.get(task.task_id)
+    assert persisted.active_run is not None
+    assert persisted.active_run.run_id == active.run_id
+    assert len(persisted.run_history) == 1
+
+    completed = await store.record_handoff(
+        task.task_id,
+        active.run_id,
+        state=TaskRunState.COMPLETED,
+        authorization=TaskExecutionAuthorization.ALWAYS,
+    )
+    assert completed.run_history[-1].state is TaskRunState.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_legacy_active_runs_survive_terminal_pruning_until_completion(
+    tmp_path, task_ids
+) -> None:
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    store = _store(tmp_path, task_ids, now)
+    task_id = next(task_ids)
+    first_active = TaskRunRecord(
+        run_id=f"run_{1:032x}",
+        trigger_instance_id="active-1",
+        trigger_kind=TaskTriggerKind.MANUAL,
+        state=TaskRunState.RUNNING,
+        triggered_at=now,
+    )
+    terminal = tuple(
+        TaskRunRecord(
+            run_id=f"run_{index + 10:032x}",
+            trigger_instance_id=f"terminal-{index}",
+            trigger_kind=TaskTriggerKind.MANUAL,
+            state=TaskRunState.COMPLETED,
+            triggered_at=now + timedelta(seconds=index + 1),
+        )
+        for index in range(25)
+    )
+    second_active = TaskRunRecord(
+        run_id=f"run_{2:032x}",
+        trigger_instance_id="active-2",
+        trigger_kind=TaskTriggerKind.MANUAL,
+        state=TaskRunState.RUNNING,
+        triggered_at=now + timedelta(seconds=30),
+    )
+    runs = (first_active, *terminal, second_active)
+    definition = TaskDefinition(
+        task_id=task_id,
+        title="Legacy overlaps",
+        state=TaskState.RUNNING,
+        created_at=now,
+        updated_at=now,
+        trigger_index=tuple(run.trigger_instance_id for run in runs),
+        run_history=runs,
+    )
+    store._write_document(TaskCenterDocument(tasks=(definition,)))
+    await store.load()
+
+    after_first = await store.record_handoff(
+        task_id,
+        first_active.run_id,
+        state=TaskRunState.COMPLETED,
+        authorization=TaskExecutionAuthorization.ALWAYS,
+    )
+
+    assert any(run.run_id == second_active.run_id for run in after_first.run_history)
+    assert len([run for run in after_first.run_history if run.state.is_terminal]) == 20
+    assert after_first.state is TaskState.RUNNING
+
+    after_second = await store.record_handoff(
+        task_id,
+        second_active.run_id,
+        state=TaskRunState.COMPLETED,
+        authorization=TaskExecutionAuthorization.ALWAYS,
+    )
+    assert after_second.active_run is None

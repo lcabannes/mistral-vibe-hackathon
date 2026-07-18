@@ -50,6 +50,35 @@ class FakeExecutionPort:
         return self.result
 
 
+class BlockingExecutionPort:
+    def __init__(self, *, defer_cancellation: bool = False) -> None:
+        self.defer_cancellation = defer_cancellation
+        self.entered = asyncio.Event()
+        self.cancelled = asyncio.Event()
+        self.release = asyncio.Event()
+        self.requests: list[TaskExecutionRequest] = []
+
+    def is_profile_available(self, profile: str) -> bool:
+        del profile
+        return True
+
+    async def handoff(self, request: TaskExecutionRequest) -> TaskExecutionResult:
+        self.requests.append(request)
+        self.entered.set()
+        try:
+            await self.release.wait()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            if not self.defer_cancellation:
+                raise
+            await self.release.wait()
+        return TaskExecutionResult(
+            disposition=TaskExecutionDisposition.STARTED,
+            authorization=TaskExecutionAuthorization.ALWAYS,
+            managed_agent_id="worker-1",
+        )
+
+
 @pytest.fixture
 def task_ids() -> Iterator[str]:
     return (f"task_{value:032x}" for value in range(1, 100))
@@ -120,6 +149,68 @@ async def test_manual_request_id_prevents_duplicate_run(tmp_path, task_ids) -> N
     assert await scheduler.trigger_manual(task.task_id, request_id="same") is None
     assert len((await store.get(task.task_id)).run_history) == 1
     await scheduler.stop()
+
+
+@pytest.mark.asyncio
+async def test_manual_request_id_survives_terminal_history_pruning(
+    tmp_path, task_ids
+) -> None:
+    clock = MutableClock(datetime(2026, 1, 1, tzinfo=UTC))
+    store = _store(tmp_path, task_ids, clock)
+    task = await store.create(TaskCreate(title="Manual"))
+    scheduler = TaskScheduler(store, clock=clock)
+    await scheduler.start()
+
+    for index in range(25):
+        event = await scheduler.trigger_manual(
+            task.task_id, request_id=f"request-{index}"
+        )
+        assert event is not None
+        await store.record_handoff(
+            task.task_id,
+            event.run_id,
+            state=TaskRunState.COMPLETED,
+            authorization=TaskExecutionAuthorization.ASK,
+        )
+
+    persisted = await store.get(task.task_id)
+    assert len(persisted.run_history) == 20
+    assert len(persisted.trigger_index) == 25
+    assert await scheduler.trigger_manual(task.task_id, request_id="request-0") is None
+    await scheduler.stop()
+
+
+@pytest.mark.asyncio
+async def test_source_event_id_survives_restart_and_history_pruning(
+    tmp_path, task_ids
+) -> None:
+    clock = MutableClock(datetime(2026, 1, 1, tzinfo=UTC))
+    store = _store(tmp_path, task_ids, clock)
+    task = await store.create(TaskCreate(title="App", trigger=AppStartTrigger()))
+    scheduler = TaskScheduler(store, clock=clock)
+    await scheduler.start()
+
+    for index in range(25):
+        source = TaskSourceEvent(
+            event_id=f"app-{index}", kind=TaskEventKind.APP_START, occurred_at=clock()
+        )
+        (event,) = await scheduler.submit_event(source)
+        await store.record_handoff(
+            task.task_id,
+            event.run_id,
+            state=TaskRunState.COMPLETED,
+            authorization=TaskExecutionAuthorization.ASK,
+        )
+    await scheduler.stop()
+
+    restarted = TaskScheduler(TaskStore(store.path, clock=clock), clock=clock)
+    await restarted.start()
+    replay = TaskSourceEvent(
+        event_id="app-0", kind=TaskEventKind.APP_START, occurred_at=clock()
+    )
+
+    assert await restarted.submit_event(replay) == ()
+    await restarted.stop()
 
 
 @pytest.mark.asyncio
@@ -229,12 +320,122 @@ async def test_timer_fires_and_reschedules_without_polling(tmp_path, task_ids) -
     fired = await asyncio.wait_for(anext(events), timeout=1)
 
     assert fired.task_id == task.task_id
+    assert not fired.coalesced
     assert scheduler.next_deadline is not None
     await store.update(task.task_id, TaskUpdate(enabled=False))
     assert scheduler.next_deadline is None
     assert scheduler._timer is None
     await events.aclose()
     await scheduler.stop()
+
+
+@pytest.mark.asyncio
+async def test_manual_shutdown_marks_retry_and_restart_reuses_run_id(
+    tmp_path, task_ids
+) -> None:
+    clock = MutableClock(datetime(2026, 1, 1, tzinfo=UTC))
+    store = _store(tmp_path, task_ids, clock)
+    task = await store.create(TaskCreate(title="Manual"))
+    blocking = BlockingExecutionPort()
+    scheduler = TaskScheduler(store, execution_port=blocking, clock=clock)
+    await scheduler.start()
+    dispatch = asyncio.create_task(
+        scheduler.trigger_manual(task.task_id, request_id="request-1")
+    )
+    await asyncio.wait_for(blocking.entered.wait(), timeout=1)
+    run_id = blocking.requests[0].run_id
+
+    await scheduler.stop()
+
+    with pytest.raises(asyncio.CancelledError):
+        await dispatch
+    assert blocking.cancelled.is_set()
+    interrupted = await store.get(task.task_id)
+    assert interrupted.active_run is not None
+    assert interrupted.active_run.state is TaskRunState.RETRY_PENDING
+
+    recovery = FakeExecutionPort(
+        TaskExecutionResult(disposition=TaskExecutionDisposition.QUEUED_FOR_APPROVAL)
+    )
+    restarted = TaskScheduler(store, execution_port=recovery, clock=clock)
+    await restarted.start()
+
+    assert recovery.requests[0].run_id == run_id
+    assert (await store.get(task.task_id)).state is TaskState.QUEUED_FOR_APPROVAL
+    await restarted.stop()
+
+
+@pytest.mark.asyncio
+async def test_source_shutdown_marks_retry_pending(tmp_path, task_ids) -> None:
+    clock = MutableClock(datetime(2026, 1, 1, tzinfo=UTC))
+    store = _store(tmp_path, task_ids, clock)
+    task = await store.create(TaskCreate(title="App", trigger=AppStartTrigger()))
+    blocking = BlockingExecutionPort()
+    scheduler = TaskScheduler(store, execution_port=blocking, clock=clock)
+    await scheduler.start()
+    dispatch = asyncio.create_task(
+        scheduler.submit_event(
+            TaskSourceEvent(
+                event_id="app-1", kind=TaskEventKind.APP_START, occurred_at=clock()
+            )
+        )
+    )
+    await asyncio.wait_for(blocking.entered.wait(), timeout=1)
+
+    await scheduler.stop()
+
+    with pytest.raises(asyncio.CancelledError):
+        await dispatch
+    interrupted = await store.get(task.task_id)
+    assert interrupted.active_run is not None
+    assert interrupted.active_run.state is TaskRunState.RETRY_PENDING
+
+
+@pytest.mark.asyncio
+async def test_timer_shutdown_marks_retry_pending(tmp_path, task_ids) -> None:
+    store = TaskStore(
+        tmp_path / ".vibe" / "tasks.toml", id_factory=lambda: next(task_ids)
+    )
+    task = await store.create(
+        TaskCreate(title="Fast", trigger=IntervalTrigger(interval_seconds=0.03))
+    )
+    blocking = BlockingExecutionPort()
+    scheduler = TaskScheduler(store, execution_port=blocking)
+    await scheduler.start()
+    await asyncio.wait_for(blocking.entered.wait(), timeout=1)
+
+    await scheduler.stop()
+
+    interrupted = await store.get(task.task_id)
+    assert interrupted.active_run is not None
+    assert interrupted.active_run.state is TaskRunState.RETRY_PENDING
+
+
+@pytest.mark.asyncio
+async def test_stop_waits_for_cancellation_deferring_handoff(
+    tmp_path, task_ids
+) -> None:
+    clock = MutableClock(datetime(2026, 1, 1, tzinfo=UTC))
+    store = _store(tmp_path, task_ids, clock)
+    task = await store.create(TaskCreate(title="Manual"))
+    blocking = BlockingExecutionPort(defer_cancellation=True)
+    scheduler = TaskScheduler(store, execution_port=blocking, clock=clock)
+    await scheduler.start()
+    dispatch = asyncio.create_task(scheduler.trigger_manual(task.task_id))
+    await asyncio.wait_for(blocking.entered.wait(), timeout=1)
+
+    stopping = asyncio.create_task(scheduler.stop())
+    await asyncio.wait_for(blocking.cancelled.wait(), timeout=1)
+    assert not stopping.done()
+    blocking.release.set()
+    await asyncio.wait_for(stopping, timeout=1)
+    await dispatch
+
+    stopped_state = await store.get(task.task_id)
+    assert stopped_state.state is TaskState.RUNNING
+    assert stopped_state.managed_agent_id == "worker-1"
+    await asyncio.sleep(0)
+    assert await store.get(task.task_id) == stopped_state
 
 
 @pytest.mark.asyncio

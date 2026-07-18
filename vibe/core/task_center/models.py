@@ -160,11 +160,20 @@ type TaskTrigger = Annotated[
 
 class TaskRunState(StrEnum):
     READY = auto()
+    RETRY_PENDING = auto()
     QUEUED_FOR_APPROVAL = auto()
     RUNNING = auto()
     BLOCKED = auto()
     COMPLETED = auto()
     FAILED = auto()
+
+    @property
+    def is_terminal(self) -> bool:
+        return self in {
+            TaskRunState.BLOCKED,
+            TaskRunState.COMPLETED,
+            TaskRunState.FAILED,
+        }
 
 
 class TaskExecutionAuthorization(StrEnum):
@@ -201,9 +210,8 @@ class TaskDefinition(_StrictModel):
     last_run_at: datetime | None = None
     next_run_at: datetime | None = None
     last_error: str | None = Field(default=None, max_length=MAX_TASK_ERROR_LENGTH)
-    run_history: tuple[TaskRunRecord, ...] = Field(
-        default_factory=tuple, max_length=MAX_TASK_RUN_HISTORY
-    )
+    trigger_index: tuple[Annotated[str, Field(min_length=1, max_length=200)], ...] = ()
+    run_history: tuple[TaskRunRecord, ...] = ()
 
     _title = field_validator("title")(_nonblank)
     _details = field_validator("details")(lambda value: value.strip())
@@ -213,11 +221,49 @@ class TaskDefinition(_StrictModel):
     _last_run_at = field_validator("last_run_at")(_optional_aware_utc)
     _next_run_at = field_validator("next_run_at")(_optional_aware_utc)
 
+    @model_validator(mode="before")
+    @classmethod
+    def populate_legacy_trigger_index(cls, value: object) -> object:
+        if not isinstance(value, dict) or "trigger_index" in value:
+            return value
+        runs = value.get("run_history")
+        if not isinstance(runs, (list, tuple)):
+            return value
+        trigger_index: list[str] = []
+        for run in runs:
+            if isinstance(run, TaskRunRecord):
+                trigger_index.append(run.trigger_instance_id)
+                continue
+            if isinstance(run, dict) and isinstance(
+                trigger_instance_id := run.get("trigger_instance_id"), str
+            ):
+                trigger_index.append(trigger_instance_id)
+        updated = dict(value)
+        updated["trigger_index"] = tuple(dict.fromkeys(trigger_index))
+        return updated
+
     @model_validator(mode="after")
     def validate_timestamps(self) -> TaskDefinition:
         if self.updated_at < self.created_at:
             raise ValueError("updated_at must not precede created_at")
+        if len(self.trigger_index) != len(set(self.trigger_index)):
+            raise ValueError("trigger index entries must be unique")
+        run_ids = [run.run_id for run in self.run_history]
+        if len(run_ids) != len(set(run_ids)):
+            raise ValueError("task run ids must be unique")
+        history_triggers = tuple(
+            dict.fromkeys(run.trigger_instance_id for run in self.run_history)
+        )
+        if not set(history_triggers).issubset(self.trigger_index):
+            raise ValueError("trigger index must contain every retained run")
         return self
+
+    @property
+    def active_run(self) -> TaskRunRecord | None:
+        return next(
+            (run for run in reversed(self.run_history) if not run.state.is_terminal),
+            None,
+        )
 
 
 class TaskCreate(_StrictModel):

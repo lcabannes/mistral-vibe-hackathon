@@ -65,3 +65,17 @@ def test_weekly_schedule_selects_next_allowed_day() -> None:
         after=datetime(2026, 1, 7, 12, tzinfo=UTC),
         created_at=datetime(2026, 1, 1, tzinfo=UTC),
     ) == datetime(2026, 1, 9, 10, tzinfo=UTC)
+
+
+def test_weekly_schedule_rechecks_weekday_after_skipped_local_date() -> None:
+    trigger = WeeklyTrigger(
+        at=time(9), timezone="Pacific/Apia", weekdays=(Weekday.FRIDAY,)
+    )
+
+    occurrence = next_occurrence(
+        trigger,
+        after=datetime(2011, 12, 29, 20, tzinfo=UTC),
+        created_at=datetime(2011, 1, 1, tzinfo=UTC),
+    )
+
+    assert occurrence == datetime(2012, 1, 5, 19, tzinfo=UTC)

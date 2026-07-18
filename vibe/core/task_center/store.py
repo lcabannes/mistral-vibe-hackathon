@@ -15,6 +15,7 @@ from uuid import uuid4
 from pydantic import ValidationError
 import tomli_w
 
+from vibe.core.task_center._process_lock import process_file_lock
 from vibe.core.task_center.models import (
     MAX_TASK_ERROR_LENGTH,
     MAX_TASK_RUN_HISTORY,
@@ -67,6 +68,7 @@ class TaskConflictError(TaskStoreError):
 class TaskTriggerRecordResult:
     task: TaskDefinition
     created: bool
+    blocked_by_active_run: bool = False
 
 
 def _utc_now() -> datetime:
@@ -93,6 +95,7 @@ class TaskStore:
             if path is not None
             else (project_root or Path.cwd()).resolve() / TASK_CENTER_PATH
         )
+        self._lock_path = self.path.with_name(f".{self.path.name}.lock")
         self._clock = clock
         self._id_factory = id_factory
         self._tasks: dict[str, TaskDefinition] = {}
@@ -163,6 +166,9 @@ class TaskStore:
             current = self._find(document, task_id)
             changes = request.model_dump(exclude_unset=True)
             trigger_changed = "trigger" in changes
+            if trigger_changed:
+                assert request.trigger is not None
+                changes["trigger"] = request.trigger.model_dump()
             enabled_changed = "enabled" in changes
             durable = current.model_dump(exclude={"managed_agent_id"})
             durable.update(changes)
@@ -222,17 +228,25 @@ class TaskStore:
         self, task_id: str, run: TaskRunRecord, *, next_run_at: datetime | None
     ) -> TaskTriggerRecordResult:
         created = False
+        blocked_by_active_run = False
 
         def mutate(document: TaskCenterDocument) -> TaskCenterDocument:
-            nonlocal created
+            nonlocal blocked_by_active_run, created
             current = self._find(document, task_id)
-            if any(
-                item.trigger_instance_id == run.trigger_instance_id
-                for item in current.run_history
-            ):
+            if run.trigger_instance_id in current.trigger_index:
                 return document
+            if any(item.run_id == run.run_id for item in current.run_history):
+                raise TaskConflictError(f"Task run already exists: {run.run_id}")
+            if current.active_run is not None:
+                blocked_by_active_run = True
+                if next_run_at == current.next_run_at:
+                    return document
+                updated = current.model_copy(
+                    update={"updated_at": run.triggered_at, "next_run_at": next_run_at}
+                )
+                return self._replace_task(document, updated)
             created = True
-            history = (*current.run_history, run)[-MAX_TASK_RUN_HISTORY:]
+            history = _prune_run_history((*current.run_history, run))
             updated = current.model_copy(
                 update={
                     "state": TaskState.READY,
@@ -240,13 +254,18 @@ class TaskStore:
                     "last_run_at": run.triggered_at,
                     "next_run_at": next_run_at,
                     "last_error": None,
+                    "trigger_index": (*current.trigger_index, run.trigger_instance_id),
                     "run_history": history,
                 }
             )
             return self._replace_task(document, updated)
 
         await self._mutate(mutate, write_when_unchanged=False)
-        return TaskTriggerRecordResult(task=await self.get(task_id), created=created)
+        return TaskTriggerRecordResult(
+            task=await self.get(task_id),
+            created=created,
+            blocked_by_active_run=blocked_by_active_run,
+        )
 
     async def record_handoff(
         self,
@@ -281,20 +300,18 @@ class TaskStore:
                 )
             if not found:
                 raise TaskConflictError(f"Unknown task run: {run_id}")
-            task_state = {
-                TaskRunState.READY: TaskState.READY,
-                TaskRunState.QUEUED_FOR_APPROVAL: TaskState.QUEUED_FOR_APPROVAL,
-                TaskRunState.RUNNING: TaskState.RUNNING,
-                TaskRunState.BLOCKED: TaskState.BLOCKED,
-                TaskRunState.COMPLETED: TaskState.COMPLETED,
-                TaskRunState.FAILED: TaskState.FAILED,
-            }[state]
+            pruned_history = _prune_run_history(tuple(history))
+            active = next(
+                (run for run in reversed(pruned_history) if not run.state.is_terminal),
+                None,
+            )
+            task_state = _task_state(active.state if active is not None else state)
             updated = current.model_copy(
                 update={
                     "state": task_state,
                     "updated_at": now,
                     "last_error": bounded_error,
-                    "run_history": tuple(history),
+                    "run_history": pruned_history,
                 }
             )
             return self._replace_task(document, updated)
@@ -306,6 +323,49 @@ class TaskStore:
                 self._runtime_agent_ids[task_id] = managed_agent_id
 
         await self._mutate(mutate, memory_update=update_runtime)
+        return await self.get(task_id)
+
+    async def mark_retry_pending(
+        self, task_id: str, run_id: str, *, error: str
+    ) -> TaskDefinition:
+        now = self._now()
+        bounded_error = error[:MAX_TASK_ERROR_LENGTH]
+
+        def mutate(document: TaskCenterDocument) -> TaskCenterDocument:
+            current = self._find(document, task_id)
+            history: list[TaskRunRecord] = []
+            changed = False
+            for run in current.run_history:
+                if run.run_id != run_id or run.state not in {
+                    TaskRunState.READY,
+                    TaskRunState.RETRY_PENDING,
+                }:
+                    history.append(run)
+                    continue
+                changed = run.state is not TaskRunState.RETRY_PENDING or (
+                    run.error != bounded_error
+                )
+                history.append(
+                    run.model_copy(
+                        update={
+                            "state": TaskRunState.RETRY_PENDING,
+                            "error": bounded_error,
+                        }
+                    )
+                )
+            if not changed:
+                return document
+            updated = current.model_copy(
+                update={
+                    "state": TaskState.READY,
+                    "updated_at": now,
+                    "last_error": bounded_error,
+                    "run_history": tuple(history),
+                }
+            )
+            return self._replace_task(document, updated)
+
+        await self._mutate(mutate, write_when_unchanged=False)
         return await self.get(task_id)
 
     def set_runtime_managed_agent(
@@ -335,15 +395,44 @@ class TaskStore:
         memory_update: Callable[[], object] | None = None,
     ) -> None:
         async with file_write_lock(self.path):
-            document = await asyncio.to_thread(self._read_document)
-            updated = mutation(document)
-            if write_when_unchanged or updated != document:
-                await asyncio.to_thread(self._write_document, updated)
+            transaction = asyncio.create_task(
+                asyncio.to_thread(self._run_transaction, mutation, write_when_unchanged)
+            )
+            cancelled = False
+            while True:
+                try:
+                    updated = await asyncio.shield(transaction)
+                    break
+                except asyncio.CancelledError:
+                    cancelled = True
             if memory_update is not None:
                 memory_update()
             self._replace_memory(updated, force_notify=memory_update is not None)
+            if cancelled:
+                raise asyncio.CancelledError
+
+    def _run_transaction(
+        self,
+        mutation: Callable[[TaskCenterDocument], TaskCenterDocument],
+        write_when_unchanged: bool,
+    ) -> TaskCenterDocument:
+        self._ensure_safe_parent()
+        try:
+            with process_file_lock(self._lock_path):
+                document = self._read_document()
+                updated = mutation(document)
+                if write_when_unchanged or updated != document:
+                    self._write_document(updated)
+                return updated
+        except TaskStoreError:
+            raise
+        except OSError as error:
+            raise TaskStoreWriteError(
+                f"Failed to lock Task Center: {self.path}"
+            ) from error
 
     def _read_document(self) -> TaskCenterDocument:
+        self._validate_safe_parent_for_read()
         if not self.path.exists():
             return TaskCenterDocument()
         if self.path.is_symlink() or not self.path.is_file():
@@ -413,6 +502,11 @@ class TaskStore:
         if self.path.is_symlink():
             raise TaskStoreWriteError(f"Unsafe Task Center path: {self.path}")
 
+    def _validate_safe_parent_for_read(self) -> None:
+        parent = self.path.parent
+        if parent.exists() and (parent.is_symlink() or not parent.is_dir()):
+            raise TaskStoreReadError(f"Unsafe Task Center directory: {parent}")
+
     def _replace_memory(
         self,
         document: TaskCenterDocument,
@@ -479,3 +573,27 @@ def _toml_ready(value: object) -> object:
     if isinstance(value, (tuple, list)):
         return [_toml_ready(item) for item in value]
     return value
+
+
+def _prune_run_history(history: tuple[TaskRunRecord, ...]) -> tuple[TaskRunRecord, ...]:
+    terminal_indexes = [
+        index for index, run in enumerate(history) if run.state.is_terminal
+    ]
+    retained_terminal_indexes = set(terminal_indexes[-MAX_TASK_RUN_HISTORY:])
+    return tuple(
+        run
+        for index, run in enumerate(history)
+        if not run.state.is_terminal or index in retained_terminal_indexes
+    )
+
+
+def _task_state(run_state: TaskRunState) -> TaskState:
+    return {
+        TaskRunState.READY: TaskState.READY,
+        TaskRunState.RETRY_PENDING: TaskState.READY,
+        TaskRunState.QUEUED_FOR_APPROVAL: TaskState.QUEUED_FOR_APPROVAL,
+        TaskRunState.RUNNING: TaskState.RUNNING,
+        TaskRunState.BLOCKED: TaskState.BLOCKED,
+        TaskRunState.COMPLETED: TaskState.COMPLETED,
+        TaskRunState.FAILED: TaskState.FAILED,
+    }[run_state]
