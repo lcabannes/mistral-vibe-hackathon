@@ -19,13 +19,15 @@ from typing import Any
 from urllib.parse import urlparse
 from uuid import uuid4
 
+import httpx
+
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from vibe.core.agents.manager import AgentManager
 from vibe.core.agents.models import BuiltinAgentName, ManagedAgentState
-from vibe.core.config import VibeConfig
+from vibe.core.config import VibeConfig, resolve_api_key
 from vibe.core.config.harness_files import init_harness_files_manager
 from vibe.core.config.orchestrator_legacy import LegacyConfigOrchestrator
 from vibe.core.utils.platform import is_windows
@@ -57,6 +59,15 @@ ALLOWED_STATIC_PATHS = {
 RUN_ACTION_PARTS = 4
 RUN_DETAIL_PARTS = 5
 CONTROL_COMMAND_PARTS = 2
+PROXY_ENV_KEYS = (
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+)
+NETWORK_PROBE_URL = "https://api.mistral.ai/v1/models"
 
 
 class AgentWorker:
@@ -67,12 +78,14 @@ class AgentWorker:
         profile: str,
         worktree: PreparedWorktree,
         session_root: Path,
+        worker_environment: dict[str, str],
     ) -> None:
         self.store = store
         self.run_id = run_id
         self.profile = profile
         self.worktree = worktree
         self.session_root = session_root
+        self.worker_environment = worker_environment
         self.ready = Event()
         self.write_lock = RLock()
         self.process: subprocess.Popen[str] | None = None
@@ -89,7 +102,7 @@ class AgentWorker:
         self.process = subprocess.Popen(
             command,
             cwd=self.worktree.path,
-            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+            env=self.worker_environment,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -160,7 +173,7 @@ class AgentWorker:
 
 
 class AgentRoomStore:
-    def __init__(self, workdir: Path) -> None:
+    def __init__(self, workdir: Path, *, network_mode: str = "auto") -> None:
         self._workdir = workdir
         self._lock = RLock()
         self._workers: dict[str, AgentWorker] = {}
@@ -168,6 +181,7 @@ class AgentRoomStore:
         self._session_root = vibe_home / "logs" / "session"
         self._registry_path = vibe_home / "agent-room" / "runs.json"
         self._runs = self._load_registry()
+        self._worker_environment, self._network = resolve_worker_network(network_mode)
         self._profiles = self._load_profiles()
         self._integration_branch = git_output(
             self._workdir, "branch", "--show-current"
@@ -184,6 +198,7 @@ class AgentRoomStore:
                 "activities": [self._public_run(run) for run in self._runs.values()],
                 "profiles": deepcopy(self._profiles),
                 "coordination": self._coordination_locked(),
+                "network": deepcopy(self._network),
             }
 
     def create(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -642,7 +657,14 @@ class AgentRoomStore:
             "merge_status": "not_ready",
             "merge_error": None,
         }
-        worker = AgentWorker(self, run_id, profile, prepared, self._session_root)
+        worker = AgentWorker(
+            self,
+            run_id,
+            profile,
+            prepared,
+            self._session_root,
+            self._worker_environment,
+        )
         with self._lock:
             if fixed_run_id is not None:
                 old = self._runs.pop(fixed_run_id, None)
@@ -1275,6 +1297,77 @@ def safe_error(error: Exception) -> str:
     return (str(error).strip() or type(error).__name__)[:1_000]
 
 
+def resolve_worker_network(mode: str) -> tuple[dict[str, str], dict[str, Any]]:
+    if mode not in {"auto", "inherit", "direct"}:
+        raise ValueError("network mode must be auto, inherit, or direct")
+    environment = {**os.environ, "PYTHONUNBUFFERED": "1"}
+    proxy_configured = any(environment.get(key) for key in PROXY_ENV_KEYS)
+    proxied = probe_mistral_transport(trust_env=True) if proxy_configured else None
+    direct = probe_mistral_transport(trust_env=False)
+    selected = mode
+    if mode == "auto":
+        selected = (
+            "direct"
+            if proxy_configured
+            and proxied is not None
+            and not proxied["reachable"]
+            and direct["reachable"]
+            else "inherit"
+        )
+    if selected == "direct":
+        for key in PROXY_ENV_KEYS:
+            environment.pop(key, None)
+
+    config = VibeConfig.load()
+    provider = config.get_provider_for_model(config.get_active_model())
+    credential = resolve_api_key(provider.api_key_env_var)
+    auth_probe = probe_mistral_transport(
+        trust_env=selected != "direct", credential=credential
+    )
+    status = {
+        "requested_mode": mode,
+        "selected_mode": selected,
+        "proxy_configured": proxy_configured,
+        "proxy_reachable": proxied["reachable"] if proxied is not None else None,
+        "direct_reachable": direct["reachable"],
+        "api_reachable": auth_probe["reachable"],
+        "credential_resolved": bool(credential),
+        "credential_source": (
+            "environment"
+            if os.environ.get(provider.api_key_env_var)
+            else ("keyring" if credential else "none")
+        ),
+        "authenticated": auth_probe["status"] == HTTPStatus.OK,
+        "http_status": auth_probe["status"],
+        "error": auth_probe["error"],
+    }
+    return environment, status
+
+
+def probe_mistral_transport(
+    *, trust_env: bool, credential: str | None = None
+) -> dict[str, Any]:
+    headers = {"Authorization": f"Bearer {credential}"} if credential else None
+    try:
+        response = httpx.get(
+            NETWORK_PROBE_URL,
+            headers=headers,
+            timeout=10,
+            trust_env=trust_env,
+        )
+        return {
+            "reachable": True,
+            "status": response.status_code,
+            "error": None,
+        }
+    except httpx.HTTPError as error:
+        return {
+            "reachable": False,
+            "status": None,
+            "error": safe_error(error),
+        }
+
+
 def terminate_process_tree(process: subprocess.Popen[str]) -> None:
     if process.poll() is not None:
         return
@@ -1436,6 +1529,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Serve the Vibe Agent Room")
     parser.add_argument("--port", type=int, default=4173)
     parser.add_argument("--workdir", type=Path, default=REPOSITORY_ROOT)
+    parser.add_argument(
+        "--network-mode",
+        choices=("auto", "inherit", "direct"),
+        default="auto",
+        help="Worker proxy policy; auto bypasses a broken inherited proxy",
+    )
     return parser.parse_args()
 
 
@@ -1445,10 +1544,15 @@ def main() -> None:
     if not workdir.is_dir():
         raise SystemExit(f"Workdir does not exist: {workdir}")
     init_harness_files_manager("user", "project")
-    store = AgentRoomStore(workdir)
+    store = AgentRoomStore(workdir, network_mode=args.network_mode)
     server = AgentRoomHTTPServer((LOOPBACK_HOST, args.port), store)
     print(f"Agent Room: http://{LOOPBACK_HOST}:{args.port}/web/agent-room/")
     print(f"Integration worktree: {workdir}")
+    network = store.snapshot()["network"]
+    print(
+        f"Mistral network: {network['selected_mode']} "
+        f"(authenticated={network['authenticated']})"
+    )
     try:
         server.serve_forever()
     except KeyboardInterrupt:

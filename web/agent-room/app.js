@@ -50,6 +50,7 @@ const state = {
   groups: [],
   profiles: [],
   coordination: null,
+  network: null,
   connected: false,
   bridgeSeen: false,
   selectedAgentId: null,
@@ -159,9 +160,10 @@ async function loadRoom() {
     state.bridgeSeen = state.connected;
     state.profiles = Array.isArray(live.profiles) ? live.profiles : [];
     state.coordination = live.coordination || null;
+    state.network = live.network || null;
     state.agents = normalizeAgents(live.activities, groupIds, stored);
     state.lastSnapshot = JSON.stringify(live.activities);
-    setFeedStatus("Live local", false);
+    updateNetworkStatus();
   } catch {
     state.connected = false;
     state.profiles = [];
@@ -199,6 +201,23 @@ function setFeedStatus(label, isError) {
   elements.feedStatus.querySelector("span").textContent = label;
 }
 
+function updateNetworkStatus() {
+  if (state.network?.authenticated) {
+    const label =
+      state.network.selected_mode === "direct" ? "Mistral direct" : "Mistral ready";
+    setFeedStatus(label, false);
+    return;
+  }
+  if (state.network && !state.network.credential_resolved) {
+    setFeedStatus("Sign-in required", true);
+    return;
+  }
+  setFeedStatus(
+    state.network ? "Mistral unavailable" : "Live local",
+    Boolean(state.network),
+  );
+}
+
 async function refreshLiveRuns() {
   if (elements.agentDialog.open || elements.groupDialog.open) return;
   try {
@@ -209,7 +228,8 @@ async function refreshLiveRuns() {
     state.bridgeSeen = true;
     state.profiles = Array.isArray(payload.profiles) ? payload.profiles : state.profiles;
     state.coordination = payload.coordination || state.coordination;
-    setFeedStatus("Live local", false);
+    state.network = payload.network || state.network;
+    updateNetworkStatus();
     const snapshot = JSON.stringify(payload.activities);
     if (snapshot === state.lastSnapshot) return;
     state.lastSnapshot = snapshot;

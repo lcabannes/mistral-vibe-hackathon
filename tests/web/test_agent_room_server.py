@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from threading import Event
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -78,6 +79,8 @@ def store(tmp_path: Path) -> Any:
     instance._workers = {}
     instance._session_root = tmp_path / "sessions"
     instance._registry_path = tmp_path / "runs.json"
+    instance._worker_environment = {"PYTHONUNBUFFERED": "1"}
+    instance._network = {}
     instance._profiles = [
         {
             "name": "default",
@@ -88,6 +91,69 @@ def store(tmp_path: Path) -> Any:
     ]
     instance._runs = {}
     return instance
+
+
+def test_auto_network_bypasses_a_broken_inherited_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for key in room.PROXY_ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("HTTPS_PROXY", "http://localhost:9")
+    monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+    provider = SimpleNamespace(api_key_env_var="MISTRAL_API_KEY")
+    config = SimpleNamespace(
+        get_active_model=lambda: object(),
+        get_provider_for_model=lambda _model: provider,
+    )
+    monkeypatch.setattr(room.VibeConfig, "load", lambda: config)
+    monkeypatch.setattr(room, "resolve_api_key", lambda _env_key: "keyring-key")
+
+    def probe(*, trust_env: bool, credential: str | None = None) -> dict[str, Any]:
+        if credential:
+            return {"reachable": True, "status": 200, "error": None}
+        if trust_env:
+            return {"reachable": False, "status": None, "error": "proxy rejected"}
+        return {"reachable": True, "status": 401, "error": None}
+
+    monkeypatch.setattr(room, "probe_mistral_transport", probe)
+
+    environment, status = room.resolve_worker_network("auto")
+
+    assert status["selected_mode"] == "direct"
+    assert status["proxy_reachable"] is False
+    assert status["direct_reachable"] is True
+    assert status["authenticated"] is True
+    assert status["credential_source"] == "keyring"
+    assert all(key not in environment for key in room.PROXY_ENV_KEYS)
+
+
+def test_inherit_network_mode_preserves_a_configured_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for key in room.PROXY_ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    proxy = "http://localhost:8080"
+    monkeypatch.setenv("HTTPS_PROXY", proxy)
+    provider = SimpleNamespace(api_key_env_var="MISTRAL_API_KEY")
+    config = SimpleNamespace(
+        get_active_model=lambda: object(),
+        get_provider_for_model=lambda _model: provider,
+    )
+    monkeypatch.setattr(room.VibeConfig, "load", lambda: config)
+    monkeypatch.setattr(room, "resolve_api_key", lambda _env_key: "environment-key")
+    monkeypatch.setenv("MISTRAL_API_KEY", "environment-key")
+    monkeypatch.setattr(
+        room,
+        "probe_mistral_transport",
+        lambda **_kwargs: {"reachable": True, "status": 200, "error": None},
+    )
+
+    environment, status = room.resolve_worker_network("inherit")
+
+    assert status["selected_mode"] == "inherit"
+    assert status["authenticated"] is True
+    assert status["credential_source"] == "environment"
+    assert environment["HTTPS_PROXY"] == proxy
 
 
 def test_message_acceptance_is_idempotent_and_fifo(store: Any) -> None:
