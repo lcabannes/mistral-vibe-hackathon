@@ -74,8 +74,10 @@ From the repository checkout, run one command:
 uv run --no-dev vibe --server
 ```
 
-`vibe --server` starts or reuses the backend in the background and then opens
-the interactive CLI. It does not open a web browser automatically. Press
+`vibe --server` stops the previously recorded Vibe Room backend, starts the
+current checkout's backend in the background, and then opens the interactive
+CLI. This ensures a new `git pull` cannot leave the webpage connected to stale
+server code. It does not open a web browser automatically. Press
 `Ctrl+1` for **Home** and select **Open Vibe Room in Browser**, or click the
 local URL printed at startup, to open the webpage in your browser. The default
 URL is <http://127.0.0.1:4173/web/agent-room/>. `auto` is the recommended network
@@ -182,9 +184,9 @@ and status with the webpage, send another message, cancel or stop work, resolve
 approvals, or answer questions. Stopped and failed agents remain selectable;
 sending a message resumes the same session and worktree.
 
-Only one Vibe Room backend may use a given `~/.vibe` directory. If startup
-reports that port 4173 or the backend is already owned, use the already-running
-page at <http://127.0.0.1:4173/web/agent-room/> or stop that process first.
+Only one Vibe Room backend may use a given `~/.vibe` directory. Running
+`vibe --server` replaces that recorded backend. If startup reports that port
+4173 has no valid owner record, stop the process occupying that port first.
 
 ## Upstream CLI installation (without hackathon features)
 

@@ -53,17 +53,16 @@ def test_server_rejects_invalid_port(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_server_starts_backend_and_continues_with_shared_url(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    calls: list[tuple[Path, int, str]] = []
+    calls: list[tuple[Path, int, str, bool]] = []
     opened_urls: list[str] = []
 
-    def ensure(workdir: Path, *, port: int, network_mode: str) -> str:
-        calls.append((workdir, port, network_mode))
+    def ensure(
+        workdir: Path, *, port: int, network_mode: str, restart_existing: bool
+    ) -> str:
+        calls.append((workdir, port, network_mode, restart_existing))
         return "http://127.0.0.1:4183"
 
-    monkeypatch.setattr(
-        "vibe.core.agent_room.ensure_agent_room_backend",
-        ensure,
-    )
+    monkeypatch.setattr("vibe.core.agent_room.ensure_agent_room_backend", ensure)
     monkeypatch.setattr("webbrowser.open", opened_urls.append)
     monkeypatch.chdir(tmp_path)
     args = _parse(
@@ -73,7 +72,7 @@ def test_server_starts_backend_and_continues_with_shared_url(
 
     _start_agent_room_server_if_requested(args)
 
-    assert calls == [(tmp_path, 4183, "direct")]
+    assert calls == [(tmp_path, 4183, "direct", True)]
     assert os.environ["VIBE_AGENT_ROOM_URL"] == "http://127.0.0.1:4183"
     assert os.environ["VIBE_AGENT_ROOM_AUTOSTART"] == "0"
     assert opened_urls == []

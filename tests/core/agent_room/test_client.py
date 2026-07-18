@@ -290,6 +290,43 @@ def test_ensure_backend_reuses_healthy_discovery(
     assert ensure_agent_room_backend(tmp_path) == "http://127.0.0.1:4321"
 
 
+def test_ensure_backend_restarts_healthy_discovered_owner_when_requested(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    discovery_path = tmp_path / "agent-room" / "server.json"
+    discovery_path.parent.mkdir(parents=True)
+    discovery_path.write_text(
+        json.dumps({"url": "http://127.0.0.1:4173", "pid": 4321}), encoding="utf-8"
+    )
+    monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+    monkeypatch.delenv("VIBE_AGENT_ROOM_URL", raising=False)
+    reachable = iter((False, True))
+    retired: list[int] = []
+    launched: list[tuple[Path, int, str, bool]] = []
+    process = SimpleNamespace(poll=lambda: None, returncode=None)
+    monkeypatch.setattr(
+        "vibe.core.agent_room.client._agent_room_reachable",
+        lambda _url: next(reachable),
+    )
+    monkeypatch.setattr(
+        "vibe.core.agent_room.client._retire_discovered_owner",
+        lambda record: retired.append(record["pid"]) or True,
+    )
+
+    def launch(workdir: Path, *, port: int, network_mode: str, force: bool) -> object:
+        launched.append((workdir, port, network_mode, force))
+        return process
+
+    monkeypatch.setattr("vibe.core.agent_room.client._spawn_agent_room_backend", launch)
+
+    assert (
+        ensure_agent_room_backend(tmp_path, restart_existing=True)
+        == "http://127.0.0.1:4173"
+    )
+    assert retired == [4321]
+    assert launched == [(tmp_path, 4173, "auto", True)]
+
+
 def test_ensure_backend_starts_requested_port_and_waits_until_ready(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -334,7 +371,7 @@ def test_ensure_backend_retires_unresponsive_discovered_owner(
         lambda _url: next(reachable),
     )
     monkeypatch.setattr(
-        "vibe.core.agent_room.client._stop_unresponsive_owner",
+        "vibe.core.agent_room.client._retire_discovered_owner",
         lambda record: retired.append(record["pid"]) or True,
     )
     monkeypatch.setattr(

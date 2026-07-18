@@ -121,7 +121,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--server",
         action="store_true",
-        help="Start or reuse the shared Vibe Room backend, then run the CLI",
+        help="Restart the shared Vibe Room backend, then run the CLI",
     )
     parser.add_argument(
         "--server-port",
@@ -466,7 +466,10 @@ def _start_agent_room_server_if_requested(args: argparse.Namespace) -> None:
     rprint("[dim]Starting or finding the shared Vibe Room...[/]", file=sys.stderr)
     try:
         url = ensure_agent_room_backend(
-            Path.cwd(), port=args.server_port, network_mode=args.server_network_mode
+            Path.cwd(),
+            port=args.server_port,
+            network_mode=args.server_network_mode,
+            restart_existing=True,
         )
     except AgentRoomUnavailable as error:
         raise SystemExit(f"Could not start Vibe Room: {error}") from error

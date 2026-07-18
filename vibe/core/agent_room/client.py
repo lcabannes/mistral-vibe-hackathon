@@ -187,7 +187,7 @@ def _terminate_agent_room_process(pid: int) -> bool:
     return _wait_for_pid_exit(pid, 1.0)
 
 
-def _stop_unresponsive_owner(discovery: dict[str, Any]) -> bool:
+def _retire_discovered_owner(discovery: dict[str, Any]) -> bool:
     pid = discovery.get("pid")
     if not isinstance(pid, int) or pid <= 1 or pid == os.getpid():
         return False
@@ -203,11 +203,19 @@ def ensure_agent_room_backend(
     port: int = 4173,
     network_mode: str = "auto",
     startup_timeout: float = BACKEND_STARTUP_TIMEOUT_SECONDS,
+    restart_existing: bool = False,
 ) -> str:
     """Return a healthy shared backend URL, starting one when necessary."""
     configured = os.environ.get("VIBE_AGENT_ROOM_URL")
     discovery = _read_agent_room_discovery()
     discovered = discover_agent_room()
+    if restart_existing and configured is None and discovery is not None:
+        if not _retire_discovered_owner(discovery):
+            raise AgentRoomUnavailable(
+                "The previous Vibe Room backend could not be stopped"
+            )
+        discovery = None
+        discovered = None
     if discovered is not None and _agent_room_reachable(discovered):
         return discovered
 
@@ -215,7 +223,7 @@ def ensure_agent_room_backend(
         configured is None
         and discovery is not None
         and discovery.get("url") == discovered
-        and not _stop_unresponsive_owner(discovery)
+        and not _retire_discovered_owner(discovery)
     ):
         raise AgentRoomUnavailable(
             "The discovered Vibe Room is unresponsive and could not be stopped"
@@ -223,6 +231,10 @@ def ensure_agent_room_backend(
 
     target = f"http://127.0.0.1:{port}"
     if target != discovered and _agent_room_reachable(target):
+        if restart_existing:
+            raise AgentRoomUnavailable(
+                f"Port {port} is occupied by a server without a valid owner record"
+            )
         return target
     process = _spawn_agent_room_backend(
         workdir, port=port, network_mode=network_mode, force=True
