@@ -511,7 +511,7 @@ function renderSummary() {
     state.agents.filter((agent) => ATTENTION_STATES.has(agent.state)).length,
   );
   elements.summaryPast.textContent = String(
-    state.agents.filter((agent) => PAST_STATES.has(agent.state)).length,
+    state.agents.filter((agent) => agent.runtime_live !== true).length,
   );
   elements.summaryIdle.textContent = String(
     state.agents.filter((agent) => agent.state === "idle").length,
