@@ -447,7 +447,9 @@ class AgentSupervisor:
         bounded_activity = self._bounded(activity, MAX_MANAGED_AGENT_ACTIVITY_CHARS)
         agent.pending_attention[attention_id] = bounded_activity
         self._transition(
-            agent, ManagedAgentState.ATTENTION, current_activity=bounded_activity
+            agent,
+            ManagedAgentState.ATTENTION,
+            current_activity=self._active_attention_activity(agent),
         )
         return attention_id
 
@@ -461,9 +463,10 @@ class AgentSupervisor:
                 agent.attention_base_activity = None
             return
         if agent.pending_attention:
-            current_activity = next(reversed(agent.pending_attention.values()))
             self._transition(
-                agent, ManagedAgentState.ATTENTION, current_activity=current_activity
+                agent,
+                ManagedAgentState.ATTENTION,
+                current_activity=self._active_attention_activity(agent),
             )
             return
         base_state = agent.attention_base_state or ManagedAgentState.RUNNING
@@ -490,7 +493,7 @@ class AgentSupervisor:
             agent.attention_base_state = state
             agent.attention_base_activity = current_activity
             state = ManagedAgentState.ATTENTION
-            current_activity = next(reversed(agent.pending_attention.values()))
+            current_activity = self._active_attention_activity(agent)
         agent.state = state
         agent.current_activity = current_activity
         if error is not ...:
@@ -498,6 +501,10 @@ class AgentSupervisor:
         if state is ManagedAgentState.STOPPED:
             agent.terminal_emitted = True
         self._emit(agent)
+
+    @staticmethod
+    def _active_attention_activity(agent: _ManagedAgent) -> str:
+        return next(iter(agent.pending_attention.values()))
 
     def _emit(self, agent: _ManagedAgent) -> None:
         agent.updated_at = time.time()

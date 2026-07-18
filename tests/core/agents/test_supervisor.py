@@ -353,6 +353,89 @@ async def test_overlapping_approvals_restore_base_after_final_resolution() -> No
 
 
 @pytest.mark.asyncio
+async def test_overlapping_approvals_report_serialized_active_request() -> None:
+    callback_lock = asyncio.Lock()
+    callback_called = {name: asyncio.Event() for name in ("first", "second")}
+    callback_active = {name: asyncio.Event() for name in ("first", "second")}
+    release = {name: asyncio.Event() for name in ("first", "second")}
+    both_pending = asyncio.Event()
+    callbacks_done = asyncio.Event()
+    finish_turn = asyncio.Event()
+    active_request: str | None = None
+    loop: FakeManagedLoop
+
+    async def approval_callback(
+        tool_name: str,
+        args: BaseModel,
+        tool_call_id: str,
+        required_permissions: list[RequiredPermission] | None,
+    ) -> tuple[ApprovalResponse, str | None]:
+        nonlocal active_request
+        callback_called[tool_call_id].set()
+        async with callback_lock:
+            active_request = tool_call_id
+            callback_active[tool_call_id].set()
+            await release[tool_call_id].wait()
+            active_request = None
+        return ApprovalResponse.YES, None
+
+    async def act(_prompt: str) -> AsyncGenerator[BaseEvent, None]:
+        yield ToolCallEvent(tool_call_id="batch", tool_name="batch", tool_class=Task)
+
+        async def request_approval(
+            tool_name: str, tool_call_id: str
+        ) -> tuple[ApprovalResponse, str | None]:
+            assert loop.approval_callback is not None
+            return await loop.approval_callback(
+                tool_name, QuestionArgs(question="approve?"), tool_call_id, None
+            )
+
+        first_task = asyncio.create_task(request_approval("first_tool", "first"))
+        await callback_active["first"].wait()
+        second_task = asyncio.create_task(request_approval("second_tool", "second"))
+        await callback_called["second"].wait()
+        both_pending.set()
+        await asyncio.gather(first_task, second_task)
+        callbacks_done.set()
+        await finish_turn.wait()
+        yield AssistantEvent(content="done")
+
+    def factory(
+        profile: str, agent_type: AgentType, logging: SessionLoggingConfig
+    ) -> FakeManagedLoop:
+        nonlocal loop
+        loop = FakeManagedLoop(act)
+        return loop
+
+    supervisor = make_supervisor(factory=factory, approval_callback=approval_callback)
+    started = await supervisor.start("default", "work")
+    await asyncio.wait_for(both_pending.wait(), timeout=2)
+
+    assert active_request == "first"
+    first_active = supervisor.output(started.agent_id)
+    assert first_active.state is ManagedAgentState.ATTENTION
+    assert first_active.current_activity == "Approval needed for first_tool"
+
+    release["first"].set()
+    await asyncio.wait_for(callback_active["second"].wait(), timeout=2)
+    assert active_request == "second"
+    second_active = supervisor.output(started.agent_id)
+    assert second_active.state is ManagedAgentState.ATTENTION
+    assert second_active.current_activity == "Approval needed for second_tool"
+
+    release["second"].set()
+    await asyncio.wait_for(callbacks_done.wait(), timeout=2)
+    restored = supervisor.output(started.agent_id)
+    assert restored.state is ManagedAgentState.WORKING
+    assert restored.current_activity == "Running batch"
+
+    finish_turn.set()
+    while supervisor.output(started.agent_id).state is not ManagedAgentState.IDLE:
+        await asyncio.sleep(0)
+    await supervisor.aclose()
+
+
+@pytest.mark.asyncio
 async def test_approval_and_question_stay_attention_when_question_is_cancelled() -> (
     None
 ):
