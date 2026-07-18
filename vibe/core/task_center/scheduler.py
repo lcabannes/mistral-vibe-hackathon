@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncGenerator, Callable, Coroutine
 from contextlib import suppress
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 import hashlib
 from typing import Any, cast
 from uuid import uuid4
@@ -67,7 +67,7 @@ class TaskScheduler:
         self._subscribers: set[asyncio.Queue[TaskTriggeredEvent | None]] = set()
         self._owner_token = f"scheduler_{uuid4().hex}"
         self._claim_lease_seconds = claim_lease_seconds
-        self._claim_renew_interval = max(0.05, claim_lease_seconds / 3)
+        self._claim_renew_interval = max(0.01, claim_lease_seconds / 3)
         self._started = False
 
     @property
@@ -272,13 +272,11 @@ class TaskScheduler:
             )
             if pending is None or pending.run_id in self._dispatching_run_ids:
                 continue
-            now = self._now()
             claim = await self._store.claim_run(
                 task.task_id,
                 pending.run_id,
                 owner_token=self._owner_token,
-                claimed_at=now,
-                claim_expires_at=self._claim_expiry(now),
+                lease_seconds=self._claim_lease_seconds,
             )
             if not claim.claimed or claim.run is None:
                 continue
@@ -352,8 +350,6 @@ class TaskScheduler:
                     scheduled_for=scheduled_for,
                     triggered_at=triggered_at,
                     coalesced=coalesced,
-                    claim_owner=self._owner_token,
-                    claim_expires_at=self._claim_expiry(triggered_at),
                 )
                 recorded = await self._store.record_trigger(
                     current.task_id,
@@ -362,6 +358,8 @@ class TaskScheduler:
                     expected_trigger=expected_trigger,
                     expected_next_run_at=scheduled_for,
                     require_next_run_match=scheduled_for is not None,
+                    claim_owner=self._owner_token,
+                    claim_lease_seconds=self._claim_lease_seconds,
                 )
                 if not recorded.created:
                     return None
@@ -439,13 +437,11 @@ class TaskScheduler:
     async def _renew_claim(self, task_id: str, run_id: str) -> None:
         while True:
             await asyncio.sleep(self._claim_renew_interval)
-            now = self._now()
             renewed = await self._store.renew_run_claim(
                 task_id,
                 run_id,
                 owner_token=self._owner_token,
-                renewed_at=now,
-                claim_expires_at=self._claim_expiry(now),
+                lease_seconds=self._claim_lease_seconds,
             )
             if not renewed:
                 return
@@ -530,9 +526,6 @@ class TaskScheduler:
     def _require_running(self) -> None:
         if not self._started:
             raise RuntimeError("Task scheduler is not running")
-
-    def _claim_expiry(self, now: datetime) -> datetime:
-        return now + timedelta(seconds=self._claim_lease_seconds)
 
     def _now(self) -> datetime:
         now = self._clock()

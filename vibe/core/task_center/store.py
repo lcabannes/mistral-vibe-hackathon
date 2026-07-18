@@ -245,9 +245,17 @@ class TaskStore:
         expected_trigger: TaskTrigger | None = None,
         expected_next_run_at: datetime | None = None,
         require_next_run_match: bool = False,
+        claim_owner: str | None = None,
+        claim_lease_seconds: float | None = None,
     ) -> TaskTriggerRecordResult:
         created = False
         blocked_by_active_run = False
+
+        if (claim_owner is None) != (claim_lease_seconds is None):
+            raise ValueError("claim owner and lease duration must be set together")
+        if claim_owner is not None and claim_lease_seconds is not None:
+            _validate_owner_token(claim_owner)
+            _validate_lease_seconds(claim_lease_seconds)
 
         def mutate(document: TaskCenterDocument) -> TaskCenterDocument:
             nonlocal blocked_by_active_run, created
@@ -272,7 +280,18 @@ class TaskStore:
                 )
                 return self._replace_task(document, updated)
             created = True
-            history = _prune_run_history((*current.run_history, run))
+            accepted_run = run
+            if claim_owner is not None and claim_lease_seconds is not None:
+                committed_at = self._now()
+                accepted_run = run.model_copy(
+                    update={
+                        "claim_owner": claim_owner,
+                        "claim_expires_at": _lease_expiry(
+                            committed_at, claim_lease_seconds
+                        ),
+                    }
+                )
+            history = _prune_run_history((*current.run_history, accepted_run))
             trigger_index = _prune_trigger_index(
                 (
                     *current.trigger_index,
@@ -372,18 +391,17 @@ class TaskStore:
         return await self.get(task_id)
 
     async def claim_run(
-        self,
-        task_id: str,
-        run_id: str,
-        *,
-        owner_token: str,
-        claimed_at: datetime,
-        claim_expires_at: datetime,
+        self, task_id: str, run_id: str, *, owner_token: str, lease_seconds: float
     ) -> TaskRunClaimResult:
         claimed = False
 
+        _validate_owner_token(owner_token)
+        _validate_lease_seconds(lease_seconds)
+
         def mutate(document: TaskCenterDocument) -> TaskCenterDocument:
             nonlocal claimed
+            claimed_at = self._now()
+            claim_expires_at = _lease_expiry(claimed_at, lease_seconds)
             current = self._find(document, task_id)
             target = self._find_run(current, run_id)
             if target.state not in {TaskRunState.READY, TaskRunState.RETRY_PENDING}:
@@ -414,8 +432,6 @@ class TaskStore:
             )
             return self._replace_task(document, updated)
 
-        _validate_claim_window(claimed_at, claim_expires_at)
-        _validate_owner_token(owner_token)
         await self._mutate(mutate, write_when_unchanged=False)
         task = await self.get(task_id)
         return TaskRunClaimResult(
@@ -425,18 +441,17 @@ class TaskStore:
         )
 
     async def renew_run_claim(
-        self,
-        task_id: str,
-        run_id: str,
-        *,
-        owner_token: str,
-        renewed_at: datetime,
-        claim_expires_at: datetime,
+        self, task_id: str, run_id: str, *, owner_token: str, lease_seconds: float
     ) -> bool:
         renewed = False
 
+        _validate_owner_token(owner_token)
+        _validate_lease_seconds(lease_seconds)
+
         def mutate(document: TaskCenterDocument) -> TaskCenterDocument:
             nonlocal renewed
+            renewed_at = self._now()
+            claim_expires_at = _lease_expiry(renewed_at, lease_seconds)
             current = self._find(document, task_id)
             target = self._find_run(current, run_id)
             if (
@@ -459,8 +474,6 @@ class TaskStore:
             )
             return self._replace_task(document, updated)
 
-        _validate_claim_window(renewed_at, claim_expires_at)
-        _validate_owner_token(owner_token)
         await self._mutate(mutate, write_when_unchanged=False)
         return renewed
 
@@ -760,18 +773,15 @@ def _prune_trigger_index(
     return retained[-MAX_TASK_TRIGGER_INDEX:]
 
 
-def _validate_claim_window(claimed_at: datetime, claim_expires_at: datetime) -> None:
-    if (
-        claimed_at.tzinfo is None
-        or claimed_at.utcoffset() is None
-        or claim_expires_at.tzinfo is None
-        or claim_expires_at.utcoffset() is None
-    ):
-        raise ValueError("claim timestamps must include a UTC offset")
-    if claim_expires_at <= claimed_at:
-        raise ValueError("claim expiry must follow claim time")
-
-
 def _validate_owner_token(owner_token: str) -> None:
     if not owner_token.strip() or len(owner_token) > MAX_TASK_CLAIM_OWNER_LENGTH:
         raise ValueError("claim owner token must be 1 to 200 nonblank characters")
+
+
+def _validate_lease_seconds(lease_seconds: float) -> None:
+    if lease_seconds <= 0:
+        raise ValueError("claim lease must be positive")
+
+
+def _lease_expiry(committed_at: datetime, lease_seconds: float) -> datetime:
+    return committed_at + timedelta(seconds=lease_seconds)

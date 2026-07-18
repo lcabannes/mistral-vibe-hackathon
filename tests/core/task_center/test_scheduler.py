@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+import threading
 
 import pytest
 
@@ -26,6 +27,7 @@ from vibe.core.task_center import (
     TaskTriggerKind,
     TaskUpdate,
 )
+from vibe.core.task_center._process_lock import process_file_lock
 
 
 class MutableClock:
@@ -309,6 +311,54 @@ async def test_live_scheduler_renews_claim_during_blocking_handoff(
     assert second_port.requests == []
     blocking.release.set()
     await first_start
+    await first.stop()
+    await second.stop()
+
+
+@pytest.mark.asyncio
+async def test_claim_lease_starts_after_cross_process_lock_wait(
+    tmp_path, task_ids
+) -> None:
+    store = TaskStore(
+        tmp_path / ".vibe" / "tasks.toml", id_factory=lambda: next(task_ids)
+    )
+    task = await store.create(TaskCreate(title="Pending"))
+    await _record_pending(store, task.task_id, datetime.now(UTC))
+    lock_entered = threading.Event()
+    release_lock = threading.Event()
+
+    def hold_transaction_lock() -> None:
+        with process_file_lock(store._lock_path):
+            lock_entered.set()
+            release_lock.wait(timeout=2)
+
+    holder = asyncio.create_task(asyncio.to_thread(hold_transaction_lock))
+    assert await asyncio.to_thread(lock_entered.wait, 1)
+    blocking = BlockingExecutionPort()
+    first = TaskScheduler(
+        TaskStore(store.path), execution_port=blocking, claim_lease_seconds=0.05
+    )
+    first_start = asyncio.create_task(first.start())
+    await asyncio.sleep(0.12)
+
+    release_lock.set()
+    await holder
+    await asyncio.wait_for(blocking.entered.wait(), timeout=1)
+    second_port = FakeExecutionPort(
+        TaskExecutionResult(disposition=TaskExecutionDisposition.QUEUED_FOR_APPROVAL)
+    )
+    second = TaskScheduler(
+        TaskStore(store.path), execution_port=second_port, claim_lease_seconds=0.05
+    )
+    await second.start()
+    await asyncio.sleep(0.12)
+
+    assert second_port.requests == []
+    blocking.release.set()
+    await first_start
+    persisted = (await TaskStore(store.path).load())[0]
+    assert persisted.state is TaskState.RUNNING
+    assert persisted.run_history[-1].claim_owner is None
     await first.stop()
     await second.stop()
 
